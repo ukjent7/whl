@@ -1,0 +1,31 @@
+name: Merge Tracker Lists
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # 每天 UTC+0 03:00 运行（国内是上午11点）
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Fetch and merge tracker lists
+        run: |
+          curl -s https://cf.trackerslist.com/all.txt -o list1.txt
+          curl -s https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt -o list2.txt
+          cat list1.txt list2.txt | grep -v '^#' | sort -u > merged_trackers.txt
+
+      - name: Commit and push if changed
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add merged_trackers.txt
+            git commit -m "✅ Auto update merged_trackers.txt"
+            git push
+          else
+            echo "No changes to commit."
+          fi
