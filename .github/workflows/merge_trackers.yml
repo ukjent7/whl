@@ -1,34 +1,57 @@
 name: Merge Tracker Lists
+
 on:
   schedule:
-    - cron: '0 3 * * *' # 每天 UTC+0 03:00 运行（国内是上午11点）
-  workflow_dispatch: # 允许手动触发
+    - cron: '0 3 * * *' # 每天 UTC 03:00 运行
+  workflow_dispatch:     # 允许手动触发
+
+# 并发控制：同一时间只允许一个实例运行，避免冲突
+concurrency:
+  group: merge-tracker-group
+  cancel-in-progress: true
+
 jobs:
   merge:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
       - name: Fetch and merge tracker lists
+        env:
+          # 将 URL 提取为环境变量，方便日后修改
+          URL_1: "https://cf.trackerslist.com/all.txt"
+          URL_2: "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt"
         run: |
-          curl -s https://cf.trackerslist.com/all.txt -o list1.txt
-          curl -s https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt -o list2.txt
+          # 1. 下载文件（关键优化：-f 参数，HTTP 错误时直接报错退出；-S 显示错误详情）
+          curl -fSL "$URL_1" -o list1.txt || exit 1
+          curl -fSL "$URL_2" -o list2.txt || exit 1
           
-          # 确保每个文件都以换行符结尾
+          # 2. 确保文件以换行符结尾，防止拼接时出错
           sed -i '$a\' list1.txt
           sed -i '$a\' list2.txt
           
-          # 合并、去重、排序
+          # 3. 合并、去重、排序
           cat list1.txt list2.txt | grep -v '^#' | grep -v '^$' | sort -u > merged_trackers.txt
           
+          # 4. 关键保护：如果合并后文件为空，终止流程，防止覆盖仓库数据
+          if [ ! -s merged_trackers.txt ]; then
+            echo "::error::Merged file is empty. Aborting to prevent data loss."
+            exit 1
+          fi
+
       - name: Commit and push if changed
         run: |
           git config --local user.email "actions@github.com"
           git config --local user.name "GitHub Actions"
-          if [ -n "$(git status --porcelain)" ]; then
+          
+          # 优化：git diff --quiet 不仅能检测文件是否存在，还能检测内容是否变化
+          # 如果没有变化，exit code 为 0，直接跳过 commit
+          if ! git diff --quiet merged_trackers.txt; then
             git add merged_trackers.txt
             git commit -m "✅ Auto update merged_trackers.txt"
             git push
+            echo "Changes pushed successfully."
           else
-            echo "No changes to commit."
+            echo "No changes detected."
           fi
