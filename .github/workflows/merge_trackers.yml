@@ -1,5 +1,4 @@
 name: Merge Tracker Lists
-
 on:
   schedule:
     - cron: '0 3 * * *' # 每天 UTC 03:00 运行
@@ -19,22 +18,17 @@ jobs:
 
       - name: Fetch and merge tracker lists
         env:
-          # 将 URL 提取为环境变量，方便日后修改
           URL_1: "https://cf.trackerslist.com/all.txt"
           URL_2: "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt"
         run: |
-          # 1. 下载文件（关键优化：-f 参数，HTTP 错误时直接报错退出；-S 显示错误详情）
           curl -fSL "$URL_1" -o list1.txt || exit 1
           curl -fSL "$URL_2" -o list2.txt || exit 1
-          
-          # 2. 确保文件以换行符结尾，防止拼接时出错
+
           sed -i '$a\' list1.txt
           sed -i '$a\' list2.txt
-          
-          # 3. 合并、去重、排序
+
           cat list1.txt list2.txt | grep -v '^#' | grep -v '^$' | sort -u > merged_trackers.txt
-          
-          # 4. 关键保护：如果合并后文件为空，终止流程，防止覆盖仓库数据
+
           if [ ! -s merged_trackers.txt ]; then
             echo "::error::Merged file is empty. Aborting to prevent data loss."
             exit 1
@@ -44,12 +38,63 @@ jobs:
         run: |
           git config --local user.email "actions@github.com"
           git config --local user.name "GitHub Actions"
-          
-          # 优化：git diff --quiet 不仅能检测文件是否存在，还能检测内容是否变化
-          # 如果没有变化，exit code 为 0，直接跳过 commit
+
           if ! git diff --quiet merged_trackers.txt; then
             git add merged_trackers.txt
             git commit -m "✅ Auto update merged_trackers.txt"
+            git push
+            echo "Changes pushed successfully."
+          else
+            echo "No changes detected."
+          fi
+
+  # ── 新增：拉取 AWAvenue 广告规则并转换为 SmartDNS 格式 ──────────────────
+  convert-ad-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Fetch and convert AWAvenue ad rules to SmartDNS format
+        env:
+          SOURCE_URL: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Dnsmasq.conf"
+          OUTPUT_FILE: "AWAvenue-Ads-Rule-SmartDNS.conf"
+        run: |
+          # 1. 拉取 Dnsmasq 格式规则
+          curl -fSL "$SOURCE_URL" -o awavenue-dnsmasq.conf || exit 1
+
+          # 2. 保护：源文件不能为空
+          if [ ! -s awavenue-dnsmasq.conf ]; then
+            echo "::error::Source file is empty. Aborting."
+            exit 1
+          fi
+
+          # 3. 按 SmartDNS 文档提供的命令转换格式
+          #    Dnsmasq: address=/example.com/#
+          #    SmartDNS: address /example.com/#
+          cat awavenue-dnsmasq.conf \
+            | grep address \
+            | awk -F= '{print "address "$2"#"}' \
+            > "$OUTPUT_FILE"
+
+          # 4. 保护：转换结果不能为空
+          if [ ! -s "$OUTPUT_FILE" ]; then
+            echo "::error::Converted file is empty. Aborting to prevent data loss."
+            exit 1
+          fi
+
+          # 5. 打印统计，方便在 Actions 日志里核查
+          RULE_COUNT=$(wc -l < "$OUTPUT_FILE")
+          echo "✅ Converted ${RULE_COUNT} rules → ${OUTPUT_FILE}"
+
+      - name: Commit and push if changed
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+
+          if ! git diff --quiet AWAvenue-Ads-Rule-SmartDNS.conf; then
+            git add AWAvenue-Ads-Rule-SmartDNS.conf
+            git commit -m "✅ Auto update AWAvenue-Ads-Rule-SmartDNS.conf"
             git push
             echo "Changes pushed successfully."
           else
