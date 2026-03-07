@@ -74,7 +74,7 @@ jobs:
           #    SmartDNS: address /example.com/#
           cat awavenue-dnsmasq.conf \
             | grep address \
-            | awk -F= '{print "address "$2"#"}' \
+            | awk -F= '{print "address "$2"}' \
             > "$OUTPUT_FILE"
 
           # 4. 保护：转换结果不能为空
