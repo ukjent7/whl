@@ -48,6 +48,80 @@ jobs:
             echo "No changes detected."
           fi
 
+# ── 新增：抖音域名规则合并并转换为 SmartDNS nameserver 格式 ──────────────
+  convert-douyin-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Fetch and convert DouYin rules to SmartDNS format
+        env:
+          URL_V2FLY: "https://raw.githubusercontent.com/v2fly/domain-list-community/refs/heads/master/data/douyin"
+          URL_BM7: "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master/rule/Clash/DouYin/DouYin.list"
+          OUTPUT_FILE: "DouYin-SmartDNS.conf"
+        run: |
+          # 1. 拉取两个源文件
+          curl -fSL "$URL_V2FLY" -o douyin-v2fly.txt || exit 1
+          curl -fSL "$URL_BM7"   -o douyin-bm7.txt  || exit 1
+
+          # 2. 源文件非空保护
+          if [ ! -s douyin-v2fly.txt ] || [ ! -s douyin-bm7.txt ]; then
+            echo "::error::One or more source files are empty. Aborting."
+            exit 1
+          fi
+
+          # 3. 从 v2fly 提取根域名
+          #    - 跳过注释行（# 开头）、空行、include:/attr: 指令
+          #    - 每行格式可能是 "domain.com" 或 "domain.com @tag"，取第一列即可
+          grep -v '^#' douyin-v2fly.txt \
+            | grep -v '^$' \
+            | grep -v '^include:' \
+            | grep -v '^attr:' \
+            | awk '{print $1}' \
+            > v2fly_domains.txt
+
+          # 4. 从 blackmatrix7 提取根域名
+          #    - 跳过注释行和空行
+          #    - 只保留 DOMAIN / DOMAIN-SUFFIX 行，取逗号后的域名字段
+          #    - 用 awk 提取最后两段（根域名），例如：
+          #        lf3-static.bytednsdoc.com → bytednsdoc.com
+          #        amemv.com                 → amemv.com
+          grep -v '^#' douyin-bm7.txt \
+            | grep -v '^$' \
+            | grep -E '^DOMAIN' \
+            | awk -F',' '{print $2}' \
+            | awk -F'.' '{print $(NF-1)"."$NF}' \
+            > bm7_domains.txt
+
+          # 5. 合并去重，转换为 SmartDNS nameserver 格式
+          cat v2fly_domains.txt bm7_domains.txt \
+            | sort -u \
+            | awk '{print "nameserver /"$1"/yys"}' \
+            > "$OUTPUT_FILE"
+
+          # 6. 结果非空保护
+          if [ ! -s "$OUTPUT_FILE" ]; then
+            echo "::error::Converted file is empty. Aborting to prevent data loss."
+            exit 1
+          fi
+
+          RULE_COUNT=$(wc -l < "$OUTPUT_FILE")
+          echo "✅ Converted ${RULE_COUNT} rules → ${OUTPUT_FILE}"
+
+      - name: Commit and push if changed
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+          if ! git diff --quiet DouYin-SmartDNS.conf; then
+            git add DouYin-SmartDNS.conf
+            git commit -m "✅ Auto update DouYin-SmartDNS.conf"
+            git push
+            echo "Changes pushed successfully."
+          else
+            echo "No changes detected."
+          fi
+          
   # ── 新增：拉取 AWAvenue 广告规则并转换为 SmartDNS 格式 ──────────────────
   convert-ad-rules:
     runs-on: ubuntu-latest
