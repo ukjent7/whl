@@ -21,9 +21,9 @@ jobs:
           FILENAME=$(basename "${{ github.event.inputs.image_url }}")
           IMGNAME="${FILENAME%.gz}"
           wget -q "${{ github.event.inputs.image_url }}" -O "$FILENAME"
-          gzip -d "$FILENAME"
+          gunzip -c "$FILENAME" > "$IMGNAME"
           dd if=/dev/zero bs=1M count=${{ github.event.inputs.expand_mb }} >> "$IMGNAME"
-          parted -s "$IMGNAME" resizepart 2 100% || true
+          parted -s "$IMGNAME" resizepart 2 100%
           gzip "$IMGNAME"
           echo "OUTPUT=$IMGNAME.gz" >> $GITHUB_ENV
 
