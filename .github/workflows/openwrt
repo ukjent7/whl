@@ -1,0 +1,34 @@
+name: Expand OpenWrt Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: '镜像下载地址'
+        required: true
+        default: 'https://example.com/immortalwrt.img.gz'
+      expand_mb:
+        description: '扩容大小 (MB)'
+        required: true
+        default: '500'
+
+jobs:
+  expand:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download & Expand Image
+        run: |
+          FILENAME=$(basename "${{ github.event.inputs.image_url }}")
+          IMGNAME="${FILENAME%.gz}"
+          wget -q "${{ github.event.inputs.image_url }}" -O "$FILENAME"
+          gzip -d "$FILENAME"
+          dd if=/dev/zero bs=1M count=${{ github.event.inputs.expand_mb }} >> "$IMGNAME"
+          parted -s "$IMGNAME" resizepart 2 100%
+          gzip "$IMGNAME"
+          echo "OUTPUT=$IMGNAME.gz" >> $GITHUB_ENV
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: expanded-image
+          path: ${{ env.OUTPUT }}
