@@ -23,7 +23,7 @@ jobs:
           wget -q "${{ github.event.inputs.image_url }}" -O "$FILENAME"
           gzip -d "$FILENAME"
           dd if=/dev/zero bs=1M count=${{ github.event.inputs.expand_mb }} >> "$IMGNAME"
-          parted -s "$IMGNAME" resizepart 2 100%
+          parted -s "$IMGNAME" resizepart 2 100% || true
           gzip "$IMGNAME"
           echo "OUTPUT=$IMGNAME.gz" >> $GITHUB_ENV
 
