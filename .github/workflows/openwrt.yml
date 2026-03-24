@@ -10,7 +10,7 @@ on:
       expand_mb:
         description: '扩容大小 (MB)'
         required: true
-        default: '500'
+        default: '1024'
 
 jobs:
   expand:
