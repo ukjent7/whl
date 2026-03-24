@@ -6,7 +6,7 @@ on:
       image_url:
         description: '镜像下载地址'
         required: true
-        default: 'https://example.com/immortalwrt.img.gz'
+        default: 'https://downloads.openwrt.org/releases/25.12.1/targets/rockchip/armv8/openwrt-25.12.1-rockchip-armv8-friendlyarm_nanopi-r3s-squashfs-sysupgrade.img.gz'
       expand_mb:
         description: '扩容大小 (MB)'
         required: true
