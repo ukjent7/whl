@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC 网页繁简转换
 // @namespace    https://github.com/opencc-wasm
-// @version      2.2.0
+// @version      2.2.1
 // @description  基于 opencc-wasm 的网页繁简转换工具
 // @match        *://*/*
 // @grant        GM_addStyle
@@ -19,16 +19,16 @@
 
   const CONFIG = {
     cdn: 'https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js',
-    batchSize: 200,  // 原为 1000，过大会卡顿
+    batchSize: 200,
     mutationDebounceMs: 200,
     skipTags: new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'INPUT', 'CODE', 'PRE', 'SVG', 'MATH', 'IFRAME']),
     modes: [
-      ['t2s',   '繁 → 简'],
+      ['t2s', '繁 → 简'],
       ['tw2sp', '台繁 → 简'],
-      ['hk2s',  '港繁 → 简'],
-      ['s2t',   '简 → 繁'],
+      ['hk2s', '港繁 → 简'],
+      ['s2t', '简 → 繁'],
       ['s2twp', '简 → 台繁'],
-      ['s2hk',  '简 → 港繁'],
+      ['s2hk', '简 → 港繁'],
     ],
   };
 
@@ -47,7 +47,7 @@
 
   const mutationQueue = new Set();
   let mutationTimer = null;
-  let toastTimer = null;  // 原为 toast.timer，改为独立变量
+  let toastTimer = null;
 
   /* ---------- 核心工具 ---------- */
 
@@ -66,8 +66,9 @@
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         const parent = node.parentElement;
-        if (!parent || CONFIG.skipTags.has(parent.tagName) || parent.isContentEditable)
-          return NodeFilter.FILTER_REJECT;
+        if (!parent || CONFIG.skipTags.has(parent.tagName) || parent.isContentEditable){
+        return NodeFilter.FILTER_REJECT;
+        }
         if (!node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
       }
@@ -174,8 +175,9 @@
     for (const mutation of mutations) {
       if (mutation.type === 'characterData') mutationQueue.add(mutation.target);
       for (const node of mutation.addedNodes) {
-        if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.ELEMENT_NODE)
+        if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.ELEMENT_NODE){
           mutationQueue.add(node);
+        }
       }
     }
     if (!mutationTimer) mutationTimer = setTimeout(processMutations, CONFIG.mutationDebounceMs);
