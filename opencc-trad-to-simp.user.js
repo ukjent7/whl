@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCC 网页繁简转换
 // @namespace    https://github.com/opencc-wasm
-// @version      2.1.0
-// @description  基于 opencc-wasm 的网页繁简转换工具（优化版）
+// @version      2.2.0
+// @description  基于 opencc-wasm 的网页繁简转换工具
 // @match        *://*/*
 // @grant        GM_addStyle
 // @grant        GM_getValue
@@ -19,21 +19,16 @@
 
   const CONFIG = {
     cdn: 'https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js',
-    batchSize: 1000,
+    batchSize: 200,  // 原为 1000，过大会卡顿
     mutationDebounceMs: 200,
-
-    skipTags: new Set([
-      'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA',
-      'INPUT', 'CODE', 'PRE', 'SVG', 'MATH', 'IFRAME'
-    ]),
-
+    skipTags: new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'INPUT', 'CODE', 'PRE', 'SVG', 'MATH', 'IFRAME']),
     modes: [
-      ['t2s', '繁 → 简'],
+      ['t2s',   '繁 → 简'],
       ['tw2sp', '台繁 → 简'],
-      ['hk2s', '港繁 → 简'],
-      ['s2t', '简 → 繁'],
+      ['hk2s',  '港繁 → 简'],
+      ['s2t',   '简 → 繁'],
       ['s2twp', '简 → 台繁'],
-      ['s2hk', '简 → 港繁'],
+      ['s2hk',  '简 → 港繁'],
     ],
   };
 
@@ -52,13 +47,12 @@
 
   const mutationQueue = new Set();
   let mutationTimer = null;
+  let toastTimer = null;  // 原为 toast.timer，改为独立变量
 
   /* ---------- 核心工具 ---------- */
 
   async function getConverter(mode) {
-    if (state.converter && state.converterMode === mode) {
-      return state.converter;
-    }
+    if (state.converter && state.converterMode === mode) return state.converter;
     if (!state.OpenCC) {
       const mod = await import(CONFIG.cdn);
       state.OpenCC = mod.default ?? mod;
@@ -69,39 +63,28 @@
   }
 
   function* walkTextNodes(root) {
-    const walker = document.createTreeWalker(
-      root,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(node) {
-          const parent = node.parentElement;
-          if (!parent) return NodeFilter.FILTER_REJECT;
-          if (CONFIG.skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
-          if (parent.isContentEditable) return NodeFilter.FILTER_REJECT;
-          if (!node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
-          return NodeFilter.FILTER_ACCEPT;
-        }
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const parent = node.parentElement;
+        if (!parent || CONFIG.skipTags.has(parent.tagName) || parent.isContentEditable)
+          return NodeFilter.FILTER_REJECT;
+        if (!node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
       }
-    );
-    let current;
-    while ((current = walker.nextNode())) yield current;
+    });
+    let node;
+    while ((node = walker.nextNode())) yield node;
   }
 
-  // 关键改进：不再跳过已转换节点，仅防止并发重复转换
   async function convertTextNode(node, converter) {
     if (state.converting.has(node)) return;
-
     const current = node.nodeValue;
     if (!current.trim()) return;
-
     state.converting.add(node);
     try {
       const converted = await converter(current);
       if (current === converted) return;
-
-      if (!state.originalMap.has(node)) {
-        state.originalMap.set(node, current);
-      }
+      if (!state.originalMap.has(node)) state.originalMap.set(node, current);
       node.nodeValue = converted;
     } catch (e) {
       console.error('[OpenCC] 节点转换失败:', e);
@@ -113,119 +96,90 @@
   async function convertNodes(nodes, converter) {
     for (let i = 0; i < nodes.length; i++) {
       await convertTextNode(nodes[i], converter);
-      if (i > 0 && i % CONFIG.batchSize === 0) {
-        await new Promise(r => setTimeout(r, 0));
-      }
+      if (i > 0 && i % CONFIG.batchSize === 0) await new Promise(r => setTimeout(r, 0));
     }
-  }
-
-  async function convertRoot(root = document.body) {
-    const converter = await getConverter(state.mode);
-    await convertNodes(Array.from(walkTextNodes(root)), converter);
   }
 
   /* ---------- 页面级操作 ---------- */
 
+  // 提取为独立函数，供正常还原与出错回滚共用
+  function restoreNodes() {
+    state.observerPaused = true;
+    for (const node of walkTextNodes(document.body)) {
+      const original = state.originalMap.get(node);
+      if (original !== undefined) node.nodeValue = original;
+    }
+    state.originalMap = new WeakMap();
+    state.converting = new WeakSet();
+    requestAnimationFrame(() => { state.observerPaused = false; });
+  }
+
   async function convertPage() {
     if (state.loading || state.enabled) return;
     state.loading = true;
-    updateButtonState();
+    updateUI();
 
     try {
+      // 取一次 converter，直接传递给 convertNodes，消除 convertRoot 的重复调用
       const converter = await getConverter(state.mode);
-
-      // 先尝试转换 title，确保 converter 可用，避免 body 转一半失败
       state.originalTitle = document.title;
-      const newTitle = await converter(document.title);
-
-      await convertRoot();
-
-      document.title = newTitle;
+      document.title = await converter(document.title);
+      await convertNodes(Array.from(walkTextNodes(document.body)), converter);
       state.enabled = true;
       toast('转换完成');
     } catch (err) {
       console.error('[OpenCC]', err);
+      // 出错时回滚已转换的节点，避免页面停留在半转换状态
+      restoreNodes();
+      if (state.originalTitle) document.title = state.originalTitle;
       toast('转换失败: ' + (err.message || '未知错误'));
     } finally {
       state.loading = false;
-      updateButtonState();
+      updateUI();
     }
   }
 
   function restorePage() {
     if (!state.enabled) return;
-    state.observerPaused = true;
-
-    for (const node of walkTextNodes(document.body)) {
-      const original = state.originalMap.get(node);
-      if (original !== undefined) node.nodeValue = original;
-    }
-
+    restoreNodes();
     if (state.originalTitle) document.title = state.originalTitle;
-
-    state.originalMap = new WeakMap();
-    state.converting = new WeakSet();
     state.enabled = false;
-
     toast('已恢复原文');
-
-    requestAnimationFrame(() => {
-      state.observerPaused = false;
-    });
   }
 
   /* ---------- MutationObserver ---------- */
 
   async function processMutations() {
     mutationTimer = null;
-    if (!state.enabled || state.loading) {
-      mutationQueue.clear();
-      return;
-    }
+    if (!state.enabled || state.loading) { mutationQueue.clear(); return; }
 
     const converter = await getConverter(state.mode);
     const nodes = Array.from(mutationQueue);
     mutationQueue.clear();
 
+    // 统一收集为文本节点，不再分两段处理
     const textNodes = [];
-    const elementNodes = [];
-
     for (const node of nodes) {
-      if (node.nodeType === Node.TEXT_NODE) textNodes.push(node);
-      else if (node.nodeType === Node.ELEMENT_NODE) elementNodes.push(node);
-    }
-
-    await convertNodes(textNodes, converter);
-
-    for (const el of elementNodes) {
-      for (const node of walkTextNodes(el)) {
-        await convertTextNode(node, converter);
+      if (node.nodeType === Node.TEXT_NODE) {
+        textNodes.push(node);
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        for (const tn of walkTextNodes(node)) textNodes.push(tn);
       }
     }
+    await convertNodes(textNodes, converter);
   }
 
   new MutationObserver(mutations => {
     if (!state.enabled || state.observerPaused) return;
-
     for (const mutation of mutations) {
-      if (mutation.type === 'characterData') {
-        mutationQueue.add(mutation.target);
-      }
+      if (mutation.type === 'characterData') mutationQueue.add(mutation.target);
       for (const node of mutation.addedNodes) {
-        if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.ELEMENT_NODE) {
+        if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.ELEMENT_NODE)
           mutationQueue.add(node);
-        }
       }
     }
-
-    if (!mutationTimer) {
-      mutationTimer = setTimeout(processMutations, CONFIG.mutationDebounceMs);
-    }
-  }).observe(document.body, {
-    childList: true,
-    subtree: true,
-    characterData: true,
-  });
+    if (!mutationTimer) mutationTimer = setTimeout(processMutations, CONFIG.mutationDebounceMs);
+  }).observe(document.body, { childList: true, subtree: true, characterData: true });
 
   /* ---------- UI ---------- */
 
@@ -301,9 +255,10 @@
     .opencc-mode:hover { background: #4b5563; }
     .opencc-mode.active { background: #2563eb; }
 
+    /* Toast 移至右上角，彻底避开底部面板 */
     #opencc-toast {
       position: fixed;
-      bottom: 90px;
+      top: 20px;
       right: 20px;
       z-index: 2147483647;
       background: rgba(0,0,0,.8);
@@ -322,7 +277,6 @@
   const button = document.createElement('button');
   button.id = 'opencc-btn';
   button.innerHTML = '<span>文</span>';
-  button.title = '左键：转换 / 恢复\n右键：切换模式';
 
   const panel = document.createElement('div');
   panel.id = 'opencc-panel';
@@ -330,9 +284,12 @@
   const toastEl = document.createElement('div');
   toastEl.id = 'opencc-toast';
 
-  function updateButtonState() {
+  function updateUI() {
     button.classList.toggle('active', state.enabled);
     button.classList.toggle('loading', state.loading);
+    // 在 tooltip 里展示当前模式，用户无需打开面板即可感知
+    const modeLabel = CONFIG.modes.find(([k]) => k === state.mode)?.[1] ?? state.mode;
+    button.title = `当前：${modeLabel}\n左键：转换 / 恢复\n右键：切换模式`;
   }
 
   function buildPanel() {
@@ -343,18 +300,15 @@
       if (key === state.mode) btn.classList.add('active');
       btn.textContent = label;
       btn.onclick = async () => {
-        if (key === state.mode) {
-          panel.classList.remove('open');
-          return;
-        }
+        if (key === state.mode) { panel.classList.remove('open'); return; }
         state.mode = key;
         GM_setValue('mode', key);
         panel.classList.remove('open');
-
         if (state.enabled) {
           restorePage();
           await convertPage();
         }
+        updateUI();
       };
       panel.appendChild(btn);
     }
@@ -363,8 +317,8 @@
   function toast(message) {
     toastEl.textContent = message;
     toastEl.classList.add('show');
-    clearTimeout(toast.timer);
-    toast.timer = setTimeout(() => toastEl.classList.remove('show'), 2000);
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2000);
   }
 
   /* ---------- 事件绑定 ---------- */
@@ -385,10 +339,7 @@
   button.addEventListener('touchmove', () => clearTimeout(longPressTimer));
 
   button.onclick = () => {
-    if (ignoreNextClick) {
-      ignoreNextClick = false;
-      return;
-    }
+    if (ignoreNextClick) { ignoreNextClick = false; return; }
     panel.classList.remove('open');
     if (state.enabled) restorePage();
     else convertPage();
@@ -401,12 +352,12 @@
   };
 
   document.addEventListener('click', e => {
-    if (!panel.contains(e.target) && e.target !== button) {
-      panel.classList.remove('open');
-    }
+    if (!panel.contains(e.target) && e.target !== button) panel.classList.remove('open');
   });
 
   document.body.append(button, panel, toastEl);
+
+  updateUI();
 
   /* ---------- 预加载 ---------- */
   getConverter(state.mode).catch(() => {});
