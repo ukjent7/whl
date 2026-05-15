@@ -1,366 +1,940 @@
 // ==UserScript==
-// @name         OpenCC 网页繁简转换
-// @namespace    https://github.com/opencc-wasm
-// @version      2.2.1
-// @description  基于 opencc-wasm 的网页繁简转换工具
-// @match        *://*/*
-// @grant        GM_addStyle
+// @name         OpenCC-WASM Webpage Converter
+// @namespace    https://tampermonkey.net/
+// @version      1.0.0
+// @description  Convert webpage Chinese text using opencc-wasm.
+// @author       ChatGPT
+// @match        http://*/*
+// @match        https://*/*
+// @run-at       document-idle
+// @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @run-at       document-idle
-// @license      MIT
+// @grant        GM_registerMenuCommand
+// @connect      cdn.jsdelivr.net
 // ==/UserScript==
 
-(async () => {
-  'use strict';
+(function () {
+  "use strict";
 
-  if (window.__OPENCC_USER_SCRIPT__) return;
-  window.__OPENCC_USER_SCRIPT__ = true;
+  /**
+   * opencc-wasm is ESM, so this userscript uses dynamic import().
+   * Default conversion: Simplified Chinese -> Taiwan Traditional + regional terms.
+   */
+  const OPENCC_ESM_URL = "https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js";
+  const DEFAULT_CONFIG = "s2twp";
+  const DEFAULT_ENABLED = true;
 
-  const CONFIG = {
-    cdn: 'https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js',
-    batchSize: 200,
-    mutationDebounceMs: 200,
-    skipTags: new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'INPUT', 'CODE', 'PRE', 'SVG', 'MATH', 'IFRAME']),
-    modes: [
-      ['t2s', '繁 → 简'],
-      ['tw2sp', '台繁 → 简'],
-      ['hk2s', '港繁 → 简'],
-      ['s2t', '简 → 繁'],
-      ['s2twp', '简 → 台繁'],
-      ['s2hk', '简 → 港繁'],
-    ],
-  };
+  const CHUNK_SIZE = 80;
+  const PROCESS_DEBOUNCE_MS = 80;
+  const FULL_SCAN_DEBOUNCE_MS = 60;
+  const PANEL_ID = "opencc-wasm-tm-panel-host";
+  const STORE_PREFIX = "openccWasmUserscript.";
+  const WARMUP_TEXT = "测试測試服务器軟體勇敢的士兵";
 
-  const state = {
-    enabled: false,
-    mode: GM_getValue('mode', 't2s'),
-    OpenCC: null,
-    converter: null,
-    converterMode: '',
-    originalMap: new WeakMap(),
-    converting: new WeakSet(),
-    originalTitle: '',
-    observerPaused: false,
-    loading: false,
-  };
+  const CONFIGS = [
+    ["s2twp", "s2twp — Simplified → Taiwan Traditional + terms"],
+    ["s2twp_jieba", "s2twp_jieba — Simplified → Taiwan Traditional + terms, Jieba"],
+    ["s2tw", "s2tw — Simplified → Taiwan Traditional"],
+    ["s2hk", "s2hk — Simplified → Hong Kong Traditional"],
+    ["s2t", "s2t — Simplified → OpenCC Traditional"],
 
-  const mutationQueue = new Set();
-  let mutationTimer = null;
-  let toastTimer = null;
+    ["tw2s", "tw2s — Taiwan Traditional → Simplified"],
+    ["tw2sp", "tw2sp — Taiwan Traditional → Simplified + terms"],
+    ["tw2sp_jieba", "tw2sp_jieba — Taiwan Traditional → Simplified + terms, Jieba"],
+    ["hk2s", "hk2s — Hong Kong Traditional → Simplified"],
+    ["t2s", "t2s — 繁体 → 简体"],
 
-  /* ---------- 核心工具 ---------- */
+    ["hk2t", "hk2t — Hong Kong Traditional → OpenCC Traditional"],
+    ["t2hk", "t2hk — OpenCC Traditional → Hong Kong Traditional"],
+    ["tw2t", "tw2t — Taiwan Traditional → OpenCC Traditional"],
+    ["t2tw", "t2tw — OpenCC Traditional → Taiwan Traditional"],
 
-  async function getConverter(mode) {
-    if (state.converter && state.converterMode === mode) return state.converter;
-    if (!state.OpenCC) {
-      const mod = await import(CONFIG.cdn);
-      state.OpenCC = mod.default ?? mod;
-    }
-    state.converter = state.OpenCC.Converter({ config: mode });
-    state.converterMode = mode;
-    return state.converter;
+    ["jp2t", "jp2t — Japanese Shinjitai → Kyūjitai"],
+    ["t2jp", "t2jp — Kyūjitai → Japanese Shinjitai"],
+
+    ["t2cngov", "t2cngov — Normalize to China Gov standard traditional"],
+    ["t2cngov_keep_simp", "t2cngov_keep_simp — Normalize traditional, keep simplified"],
+    ["t2cngov_jieba", "t2cngov_jieba — China Gov standard traditional, Jieba"],
+    ["t2cngov_keep_simp_jieba", "t2cngov_keep_simp_jieba — Normalize traditional, keep simplified, Jieba"],
+  ];
+
+  const CONFIG_VALUES = new Set(CONFIGS.map(([value]) => value));
+
+  const SKIP_SELECTOR = [
+    `#${PANEL_ID}`,
+    "[data-opencc-ignore]",
+    "script",
+    "style",
+    "noscript",
+    "template",
+    "textarea",
+    "input",
+    "select",
+    "option",
+    "code",
+    "pre",
+    "kbd",
+    "samp",
+    "svg",
+    "math",
+    "canvas",
+  ].join(",");
+
+  let HAS_HAN;
+  try {
+    HAS_HAN = new RegExp("\\p{Script=Han}", "u");
+  } catch (_) {
+    HAS_HAN = /[\u3400-\u9fff\uf900-\ufaff]/;
   }
 
-  function* walkTextNodes(root) {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        const parent = node.parentElement;
-        if (!parent || CONFIG.skipTags.has(parent.tagName) || parent.isContentEditable){
-        return NodeFilter.FILTER_REJECT;
-        }
-        if (!node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
-      }
-    });
-    let node;
-    while ((node = walker.nextNode())) yield node;
-  }
+  let config = readConfig();
+  let enabled = Boolean(storeGet("enabled", DEFAULT_ENABLED));
+  let collapsed = Boolean(storeGet("collapsed", false));
 
-  async function convertTextNode(node, converter) {
-    if (state.converting.has(node)) return;
-    const current = node.nodeValue;
-    if (!current.trim()) return;
-    state.converting.add(node);
-    try {
-      const converted = await converter(current);
-      if (current === converted) return;
-      if (!state.originalMap.has(node)) state.originalMap.set(node, current);
-      node.nodeValue = converted;
-    } catch (e) {
-      console.error('[OpenCC] 节点转换失败:', e);
-    } finally {
-      state.converting.delete(node);
-    }
-  }
+  let openCCPromise = null;
+  const converters = new Map();
+  const converterPromises = new Map();
 
-  async function convertNodes(nodes, converter) {
-    for (let i = 0; i < nodes.length; i++) {
-      await convertTextNode(nodes[i], converter);
-      if (i > 0 && i % CONFIG.batchSize === 0) await new Promise(r => setTimeout(r, 0));
-    }
-  }
+  const nodeStates = new Map();
+  let queue = [];
+  let queuedNodes = new WeakSet();
 
-  /* ---------- 页面级操作 ---------- */
+  let processing = false;
+  let generation = 0;
+  let observing = false;
+  let processTimer = 0;
+  let fullScanTimer = 0;
+  let pruneTimer = 0;
 
-  // 提取为独立函数，供正常还原与出错回滚共用
-  function restoreNodes() {
-    state.observerPaused = true;
-    for (const node of walkTextNodes(document.body)) {
-      const original = state.originalMap.get(node);
-      if (original !== undefined) node.nodeValue = original;
-    }
-    state.originalMap = new WeakMap();
-    state.converting = new WeakSet();
-    requestAnimationFrame(() => { state.observerPaused = false; });
-  }
+  let latestStatus = enabled ? `Starting · ${config}` : "Off";
+  let latestBusy = false;
+  let latestError = false;
+  let ui = null;
 
-  async function convertPage() {
-    if (state.loading || state.enabled) return;
-    state.loading = true;
-    updateUI();
+  const observer = new MutationObserver(handleMutations);
 
-    try {
-      // 取一次 converter，直接传递给 convertNodes，消除 convertRoot 的重复调用
-      const converter = await getConverter(state.mode);
-      state.originalTitle = document.title;
-      document.title = await converter(document.title);
-      await convertNodes(Array.from(walkTextNodes(document.body)), converter);
-      state.enabled = true;
-      toast('转换完成');
-    } catch (err) {
-      console.error('[OpenCC]', err);
-      // 出错时回滚已转换的节点，避免页面停留在半转换状态
-      restoreNodes();
-      if (state.originalTitle) document.title = state.originalTitle;
-      toast('转换失败: ' + (err.message || '未知错误'));
-    } finally {
-      state.loading = false;
-      updateUI();
-    }
-  }
-
-  function restorePage() {
-    if (!state.enabled) return;
-    restoreNodes();
-    if (state.originalTitle) document.title = state.originalTitle;
-    state.enabled = false;
-    toast('已恢复原文');
-  }
-
-  /* ---------- MutationObserver ---------- */
-
-  async function processMutations() {
-    mutationTimer = null;
-    if (!state.enabled || state.loading) { mutationQueue.clear(); return; }
-
-    const converter = await getConverter(state.mode);
-    const nodes = Array.from(mutationQueue);
-    mutationQueue.clear();
-
-    // 统一收集为文本节点，不再分两段处理
-    const textNodes = [];
-    for (const node of nodes) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        textNodes.push(node);
-      } else if (node.nodeType === Node.ELEMENT_NODE) {
-        for (const tn of walkTextNodes(node)) textNodes.push(tn);
-      }
-    }
-    await convertNodes(textNodes, converter);
-  }
-
-  new MutationObserver(mutations => {
-    if (!state.enabled || state.observerPaused) return;
-    for (const mutation of mutations) {
-      if (mutation.type === 'characterData') mutationQueue.add(mutation.target);
-      for (const node of mutation.addedNodes) {
-        if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.ELEMENT_NODE){
-          mutationQueue.add(node);
-        }
-      }
-    }
-    if (!mutationTimer) mutationTimer = setTimeout(processMutations, CONFIG.mutationDebounceMs);
-  }).observe(document.body, { childList: true, subtree: true, characterData: true });
-
-  /* ---------- UI ---------- */
-
-  GM_addStyle(`
-    #opencc-btn {
-      position: fixed;
-      right: 20px;
-      bottom: 20px;
-      width: 52px;
-      height: 52px;
-      border: none;
-      border-radius: 50%;
-      z-index: 2147483647;
-      cursor: pointer;
-      background: #1f2937;
-      color: white;
-      font-size: 18px;
-      box-shadow: 0 4px 12px rgba(0,0,0,.25);
-      transition: all .2s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      user-select: none;
-      -webkit-tap-highlight-color: transparent;
-    }
-    #opencc-btn:hover { transform: scale(1.05); }
-    #opencc-btn:active { transform: scale(0.95); }
-    #opencc-btn.active { background: #2563eb; }
-    #opencc-btn.loading {
-      background: #4b5563;
-      pointer-events: none;
-    }
-    #opencc-btn.loading::after {
-      content: '';
-      width: 18px;
-      height: 18px;
-      border: 2px solid transparent;
-      border-top-color: white;
-      border-radius: 50%;
-      animation: opencc-spin 1s linear infinite;
-      position: absolute;
-    }
-    #opencc-btn.loading span { visibility: hidden; }
-    @keyframes opencc-spin { to { transform: rotate(360deg); } }
-
-    #opencc-panel {
-      position: fixed;
-      right: 20px;
-      bottom: 84px;
-      z-index: 2147483647;
-      background: rgba(30,30,40,.96);
-      padding: 10px;
-      border-radius: 10px;
-      display: none;
-      flex-direction: column;
-      gap: 8px;
-      backdrop-filter: blur(8px);
-      min-width: 140px;
-    }
-    #opencc-panel.open { display: flex; }
-
-    .opencc-mode {
-      border: none;
-      background: #374151;
-      color: white;
-      padding: 8px 12px;
-      border-radius: 6px;
-      cursor: pointer;
-      text-align: left;
-      font-size: 14px;
-      transition: background .15s;
-    }
-    .opencc-mode:hover { background: #4b5563; }
-    .opencc-mode.active { background: #2563eb; }
-
-    /* Toast 移至右上角，彻底避开底部面板 */
-    #opencc-toast {
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      z-index: 2147483647;
-      background: rgba(0,0,0,.8);
-      color: white;
-      padding: 8px 14px;
-      border-radius: 8px;
-      font-size: 14px;
-      opacity: 0;
-      transition: opacity .2s;
-      pointer-events: none;
-      white-space: nowrap;
-    }
-    #opencc-toast.show { opacity: 1; }
-  `);
-
-  const button = document.createElement('button');
-  button.id = 'opencc-btn';
-  button.innerHTML = '<span>文</span>';
-
-  const panel = document.createElement('div');
-  panel.id = 'opencc-panel';
-
-  const toastEl = document.createElement('div');
-  toastEl.id = 'opencc-toast';
-
-  function updateUI() {
-    button.classList.toggle('active', state.enabled);
-    button.classList.toggle('loading', state.loading);
-    // 在 tooltip 里展示当前模式，用户无需打开面板即可感知
-    const modeLabel = CONFIG.modes.find(([k]) => k === state.mode)?.[1] ?? state.mode;
-    button.title = `当前：${modeLabel}\n左键：转换 / 恢复\n右键：切换模式`;
-  }
-
-  function buildPanel() {
-    panel.innerHTML = '';
-    for (const [key, label] of CONFIG.modes) {
-      const btn = document.createElement('button');
-      btn.className = 'opencc-mode';
-      if (key === state.mode) btn.classList.add('active');
-      btn.textContent = label;
-      btn.onclick = async () => {
-        if (key === state.mode) { panel.classList.remove('open'); return; }
-        state.mode = key;
-        GM_setValue('mode', key);
-        panel.classList.remove('open');
-        if (state.enabled) {
-          restorePage();
-          await convertPage();
-        }
-        updateUI();
-      };
-      panel.appendChild(btn);
-    }
-  }
-
-  function toast(message) {
-    toastEl.textContent = message;
-    toastEl.classList.add('show');
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2000);
-  }
-
-  /* ---------- 事件绑定 ---------- */
-
-  let longPressTimer;
-  let ignoreNextClick = false;
-
-  button.addEventListener('touchstart', () => {
-    ignoreNextClick = false;
-    longPressTimer = setTimeout(() => {
-      ignoreNextClick = true;
-      buildPanel();
-      panel.classList.toggle('open');
-    }, 600);
-  }, { passive: true });
-
-  button.addEventListener('touchend', () => clearTimeout(longPressTimer));
-  button.addEventListener('touchmove', () => clearTimeout(longPressTimer));
-
-  button.onclick = () => {
-    if (ignoreNextClick) { ignoreNextClick = false; return; }
-    panel.classList.remove('open');
-    if (state.enabled) restorePage();
-    else convertPage();
-  };
-
-  button.oncontextmenu = e => {
-    e.preventDefault();
-    buildPanel();
-    panel.classList.toggle('open');
-  };
-
-  document.addEventListener('click', e => {
-    if (!panel.contains(e.target) && e.target !== button) panel.classList.remove('open');
+  main().catch((err) => {
+    console.error("[OpenCC-WASM userscript] Fatal error:", err);
+    setStatus("Fatal error", false, true);
   });
 
-  document.body.append(button, panel, toastEl);
+  async function main() {
+    if (document.contentType && !/html/i.test(document.contentType)) return;
 
-  updateUI();
+    await domReady();
+    if (!document.body) return;
 
-  /* ---------- 预加载 ---------- */
-  getConverter(state.mode).catch(() => {});
+    createPanel();
+    registerMenus();
+
+    if (enabled) {
+      startObserving();
+      scheduleFullScan(0);
+    } else {
+      setStatus("Off");
+    }
+  }
+
+  function domReady() {
+    if (document.readyState === "loading") {
+      return new Promise((resolve) => {
+        document.addEventListener("DOMContentLoaded", resolve, { once: true });
+      });
+    }
+    return Promise.resolve();
+  }
+
+  function readConfig() {
+    const saved = storeGet("config", DEFAULT_CONFIG);
+    return CONFIG_VALUES.has(saved) ? saved : DEFAULT_CONFIG;
+  }
+
+  function storeGet(key, fallback) {
+    const fullKey = STORE_PREFIX + key;
+
+    try {
+      if (typeof GM_getValue === "function") {
+        return GM_getValue(fullKey, fallback);
+      }
+    } catch (_) {}
+
+    try {
+      const raw = localStorage.getItem(fullKey);
+      return raw == null ? fallback : JSON.parse(raw);
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function storeSet(key, value) {
+    const fullKey = STORE_PREFIX + key;
+
+    try {
+      if (typeof GM_setValue === "function") {
+        GM_setValue(fullKey, value);
+        return;
+      }
+    } catch (_) {}
+
+    try {
+      localStorage.setItem(fullKey, JSON.stringify(value));
+    } catch (_) {}
+  }
+
+  function registerMenus() {
+    if (typeof GM_registerMenuCommand !== "function") return;
+
+    GM_registerMenuCommand("OpenCC-WASM: Toggle conversion", () => {
+      setEnabled(!enabled);
+    });
+
+    GM_registerMenuCommand("OpenCC-WASM: Convert page now", () => {
+      if (!enabled) setEnabled(true);
+      else scheduleFullScan(0);
+    });
+
+    GM_registerMenuCommand("OpenCC-WASM: Restore original text / turn off", () => {
+      setEnabled(false);
+    });
+  }
+
+  async function loadOpenCC() {
+    if (!openCCPromise) {
+      openCCPromise = import(OPENCC_ESM_URL)
+        .then((mod) => mod.default || mod)
+        .catch((err) => {
+          openCCPromise = null;
+          throw err;
+        });
+    }
+
+    return openCCPromise;
+  }
+
+  async function getConverter(configName) {
+    if (converters.has(configName)) {
+      return converters.get(configName);
+    }
+
+    if (converterPromises.has(configName)) {
+      return converterPromises.get(configName);
+    }
+
+    const promise = (async () => {
+      const OpenCC = await loadOpenCC();
+      const converter = OpenCC.Converter({ config: configName });
+
+      // Warm up and trigger resource download once.
+      await converter(WARMUP_TEXT);
+
+      converters.set(configName, converter);
+      converterPromises.delete(configName);
+      return converter;
+    })().catch((err) => {
+      converterPromises.delete(configName);
+      throw err;
+    });
+
+    converterPromises.set(configName, promise);
+    return promise;
+  }
+
+  function shouldSkipElement(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    if (el.isContentEditable) return true;
+    return Boolean(el.closest(SKIP_SELECTOR));
+  }
+
+  function shouldProcessTextNode(node) {
+    if (!node || node.nodeType !== Node.TEXT_NODE) return false;
+
+    const text = node.nodeValue;
+    if (!text || !HAS_HAN.test(text)) return false;
+
+    const parent = node.parentElement;
+    if (!parent || shouldSkipElement(parent)) return false;
+
+    return true;
+  }
+
+  function rememberOriginal(node, resetOriginal = false) {
+    let state = nodeStates.get(node);
+
+    if (!state || resetOriginal) {
+      state = {
+        original: node.nodeValue,
+        version: state ? state.version + 1 : 1,
+        convertedConfig: null,
+        convertedText: null,
+      };
+      nodeStates.set(node, state);
+    }
+
+    return state;
+  }
+
+  function enqueueTextNode(node, resetOriginal = false) {
+    if (!shouldProcessTextNode(node)) return false;
+
+    rememberOriginal(node, resetOriginal);
+
+    if (!queuedNodes.has(node)) {
+      queuedNodes.add(node);
+      queue.push(node);
+      return true;
+    }
+
+    return false;
+  }
+
+  function collectTextNodes(root, resetOriginal = false) {
+    if (!root) return 0;
+
+    if (root.nodeType === Node.TEXT_NODE) {
+      return enqueueTextNode(root, resetOriginal) ? 1 : 0;
+    }
+
+    if (
+      root.nodeType !== Node.ELEMENT_NODE &&
+      root.nodeType !== Node.DOCUMENT_NODE &&
+      root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE
+    ) {
+      return 0;
+    }
+
+    if (root.nodeType === Node.ELEMENT_NODE && shouldSkipElement(root)) {
+      return 0;
+    }
+
+    let count = 0;
+
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        return shouldProcessTextNode(node)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      },
+    });
+
+    let node;
+    while ((node = walker.nextNode())) {
+      if (enqueueTextNode(node, resetOriginal)) count++;
+    }
+
+    return count;
+  }
+
+  function clearQueue() {
+    queue = [];
+    queuedNodes = new WeakSet();
+  }
+
+  function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
+    if (!enabled) return;
+
+    if (fullScanTimer) clearTimeout(fullScanTimer);
+
+    fullScanTimer = setTimeout(() => {
+      fullScanTimer = 0;
+      if (!enabled || !document.body) return;
+
+      clearQueue();
+
+      const count = collectTextNodes(document.body, false);
+
+      if (count > 0) {
+        setStatus(`Queued ${count} text nodes`, true);
+        scheduleProcess(0);
+      } else {
+        setStatus(`On · ${config}`);
+      }
+    }, delay);
+  }
+
+  function scheduleProcess(delay = PROCESS_DEBOUNCE_MS) {
+    if (!enabled) return;
+
+    if (processTimer) clearTimeout(processTimer);
+
+    processTimer = setTimeout(() => {
+      processTimer = 0;
+      void processQueue();
+    }, delay);
+  }
+
+  async function processQueue() {
+    if (processing || !enabled) return;
+
+    if (processTimer) {
+      clearTimeout(processTimer);
+      processTimer = 0;
+    }
+
+    if (!queue.length) {
+      setStatus(`On · ${config}`);
+      return;
+    }
+
+    processing = true;
+
+    const myGeneration = generation;
+    const myConfig = config;
+
+    try {
+      setStatus(`Loading ${myConfig}…`, true);
+
+      const converter = await getConverter(myConfig);
+
+      if (!enabled || generation !== myGeneration || config !== myConfig) return;
+
+      while (
+        enabled &&
+        generation === myGeneration &&
+        config === myConfig &&
+        queue.length
+      ) {
+        const chunk = [];
+
+        while (queue.length && chunk.length < CHUNK_SIZE) {
+          const node = queue.shift();
+          queuedNodes.delete(node);
+
+          if (!node || !node.isConnected) continue;
+
+          if (!shouldProcessTextNode(node)) continue;
+
+          let state = nodeStates.get(node);
+          if (!state) state = rememberOriginal(node, false);
+
+          if (!state.original || !HAS_HAN.test(state.original)) continue;
+
+          if (
+            state.convertedConfig === myConfig &&
+            node.nodeValue === state.convertedText
+          ) {
+            continue;
+          }
+
+          chunk.push({
+            node,
+            state,
+            version: state.version,
+            original: state.original,
+          });
+        }
+
+        if (!chunk.length) {
+          await yieldToBrowser();
+          continue;
+        }
+
+        setStatus(`Converting… ${queue.length} left`, true);
+
+        let results;
+        try {
+          results = await Promise.all(
+            chunk.map((item) => converter(item.original))
+          );
+        } catch (err) {
+          console.error("[OpenCC-WASM userscript] Conversion failed:", err);
+          setStatus("Conversion failed", false, true);
+          return;
+        }
+
+        if (!enabled || generation !== myGeneration || config !== myConfig) {
+          break;
+        }
+
+        stopObserving(true);
+
+        try {
+          for (let i = 0; i < chunk.length; i++) {
+            if (!enabled || generation !== myGeneration || config !== myConfig) {
+              break;
+            }
+
+            const item = chunk[i];
+            const currentState = nodeStates.get(item.node);
+
+            if (currentState !== item.state) continue;
+            if (item.state.version !== item.version) continue;
+            if (!item.node.isConnected) continue;
+            if (!shouldProcessTextNode(item.node)) continue;
+
+            const convertedText =
+              typeof results[i] === "string" ? results[i] : String(results[i]);
+
+            if (item.node.nodeValue !== convertedText) {
+              item.node.nodeValue = convertedText;
+            }
+
+            item.state.convertedConfig = myConfig;
+            item.state.convertedText = convertedText;
+          }
+        } finally {
+          if (enabled) startObserving();
+        }
+
+        await yieldToBrowser();
+      }
+
+      if (enabled && generation === myGeneration && config === myConfig) {
+        setStatus(`On · ${myConfig}`);
+      }
+    } catch (err) {
+      console.error("[OpenCC-WASM userscript] OpenCC load/process error:", err);
+      setStatus("OpenCC error", false, true);
+    } finally {
+      processing = false;
+
+      if (enabled && queue.length) {
+        scheduleProcess(0);
+      }
+    }
+  }
+
+  function handleMutations(mutations) {
+    if (!enabled) return;
+
+    let enqueued = 0;
+    let sawRemovedNodes = false;
+
+    for (const mutation of mutations) {
+      if (mutation.type === "characterData") {
+        const node = mutation.target;
+
+        if (shouldProcessTextNode(node)) {
+          if (enqueueTextNode(node, true)) enqueued++;
+        } else {
+          nodeStates.delete(node);
+        }
+      } else if (mutation.type === "childList") {
+        for (const added of mutation.addedNodes) {
+          enqueued += collectTextNodes(added, false);
+        }
+
+        if (mutation.removedNodes && mutation.removedNodes.length) {
+          sawRemovedNodes = true;
+        }
+      }
+    }
+
+    if (enqueued > 0) scheduleProcess(PROCESS_DEBOUNCE_MS);
+    if (sawRemovedNodes) schedulePrune();
+  }
+
+  function startObserving() {
+    if (observing || !enabled || !document.body) return;
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+
+    observing = true;
+  }
+
+  function stopObserving(processPending = false) {
+    if (!observing) return;
+
+    if (processPending) {
+      const pending = observer.takeRecords();
+      if (pending.length) handleMutations(pending);
+    }
+
+    observer.disconnect();
+    observing = false;
+  }
+
+  function schedulePrune() {
+    if (pruneTimer) return;
+
+    pruneTimer = setTimeout(() => {
+      pruneTimer = 0;
+
+      for (const [node] of nodeStates) {
+        if (!node.isConnected) {
+          nodeStates.delete(node);
+        }
+      }
+    }, 5000);
+  }
+
+  function clearScheduledTimers() {
+    if (processTimer) {
+      clearTimeout(processTimer);
+      processTimer = 0;
+    }
+
+    if (fullScanTimer) {
+      clearTimeout(fullScanTimer);
+      fullScanTimer = 0;
+    }
+  }
+
+  function restoreOriginals() {
+    clearScheduledTimers();
+    stopObserving(false);
+
+    for (const [node, state] of nodeStates) {
+      try {
+        if (
+          node &&
+          node.nodeType === Node.TEXT_NODE &&
+          typeof state.original === "string" &&
+          node.nodeValue !== state.original
+        ) {
+          node.nodeValue = state.original;
+        }
+      } catch (_) {}
+    }
+
+    nodeStates.clear();
+    clearQueue();
+  }
+
+  function setEnabled(nextEnabled) {
+    nextEnabled = Boolean(nextEnabled);
+
+    if (nextEnabled === enabled) {
+      if (enabled) {
+        scheduleFullScan(0);
+      } else {
+        restoreOriginals();
+        setStatus("Off");
+      }
+
+      refreshControls();
+      return;
+    }
+
+    generation++;
+
+    if (!nextEnabled) {
+      // Process pending external page mutations before restoring originals.
+      stopObserving(true);
+
+      enabled = false;
+      storeSet("enabled", enabled);
+
+      restoreOriginals();
+      setStatus("Off");
+    } else {
+      enabled = true;
+      storeSet("enabled", enabled);
+
+      setStatus(`Starting · ${config}`, true);
+      startObserving();
+      scheduleFullScan(0);
+    }
+
+    refreshControls();
+  }
+
+  function setConfig(nextConfig) {
+    if (!CONFIG_VALUES.has(nextConfig)) return;
+
+    if (nextConfig === config) {
+      refreshControls();
+      return;
+    }
+
+    config = nextConfig;
+    storeSet("config", config);
+
+    generation++;
+    clearQueue();
+
+    refreshControls();
+
+    if (enabled) {
+      setStatus(`Switching to ${config}…`, true);
+      scheduleFullScan(0);
+    } else {
+      setStatus("Off");
+    }
+  }
+
+  function yieldToBrowser() {
+    return new Promise((resolve) => {
+      if (typeof window.requestIdleCallback === "function") {
+        window.requestIdleCallback(() => resolve(), { timeout: 100 });
+      } else {
+        setTimeout(resolve, 0);
+      }
+    });
+  }
+
+  function createPanel() {
+    if (document.getElementById(PANEL_ID)) return;
+
+    const host = document.createElement("div");
+    host.id = PANEL_ID;
+    host.setAttribute("data-opencc-ignore", "true");
+    document.body.appendChild(host);
+
+    const root = host.attachShadow({ mode: "open" });
+
+    root.innerHTML = `
+      <style>
+        :host {
+          all: initial;
+          position: fixed;
+          right: 16px;
+          bottom: 16px;
+          z-index: 2147483647;
+          font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          color: #111827;
+        }
+
+        * {
+          box-sizing: border-box;
+        }
+
+        .card {
+          width: 340px;
+          background: rgba(255, 255, 255, 0.97);
+          border: 1px solid rgba(17, 24, 39, 0.14);
+          border-radius: 12px;
+          box-shadow: 0 12px 36px rgba(0, 0, 0, 0.22);
+          overflow: hidden;
+          backdrop-filter: blur(8px);
+        }
+
+        .top {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 8px 10px;
+          background: #111827;
+          color: #fff;
+        }
+
+        .brand {
+          font-size: 13px;
+          font-weight: 700;
+          letter-spacing: 0.01em;
+        }
+
+        .status {
+          margin-left: auto;
+          max-width: 170px;
+          overflow: hidden;
+          white-space: nowrap;
+          text-overflow: ellipsis;
+          font-size: 11px;
+          color: #d1d5db;
+        }
+
+        .status.error {
+          color: #fecaca;
+        }
+
+        .status.busy::before {
+          content: "";
+          display: inline-block;
+          width: 7px;
+          height: 7px;
+          margin-right: 5px;
+          border: 1px solid #9ca3af;
+          border-top-color: transparent;
+          border-radius: 999px;
+          animation: spin 0.9s linear infinite;
+          vertical-align: -1px;
+        }
+
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+
+        .icon {
+          width: 24px;
+          height: 22px;
+          border: 0;
+          border-radius: 6px;
+          background: rgba(255, 255, 255, 0.12);
+          color: #fff;
+          cursor: pointer;
+          font: inherit;
+          line-height: 1;
+        }
+
+        .icon:hover {
+          background: rgba(255, 255, 255, 0.22);
+        }
+
+        .body {
+          padding: 10px;
+        }
+
+        .body[hidden] {
+          display: none !important;
+        }
+
+        label {
+          display: block;
+          margin-bottom: 5px;
+          font-size: 12px;
+          font-weight: 650;
+          color: #374151;
+        }
+
+        select {
+          width: 100%;
+          min-height: 32px;
+          border: 1px solid #d1d5db;
+          border-radius: 8px;
+          padding: 5px 8px;
+          background: #fff;
+          color: #111827;
+          font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        .row {
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr;
+          gap: 6px;
+          margin-top: 9px;
+        }
+
+        button {
+          min-height: 30px;
+          border: 1px solid #d1d5db;
+          border-radius: 8px;
+          background: #f9fafb;
+          color: #111827;
+          cursor: pointer;
+          font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        button:hover {
+          background: #f3f4f6;
+        }
+
+        button.primary {
+          border-color: #2563eb;
+          background: #2563eb;
+          color: #fff;
+        }
+
+        button.primary:hover {
+          background: #1d4ed8;
+        }
+
+        button.danger {
+          border-color: #dc2626;
+          background: #dc2626;
+          color: #fff;
+        }
+
+        button.danger:hover {
+          background: #b91c1c;
+        }
+
+        .hint {
+          margin-top: 8px;
+          font-size: 11px;
+          color: #6b7280;
+        }
+      </style>
+
+      <div class="card">
+        <div class="top">
+          <div class="brand">OpenCC-WASM</div>
+          <div id="status" class="status"></div>
+          <button id="collapse" class="icon" title="Collapse">−</button>
+        </div>
+
+        <div id="body" class="body">
+          <label for="config">转换配置</label>
+          <select id="config"></select>
+
+          <div class="row">
+            <button id="toggle"></button>
+            <button id="convert">立即转换</button>
+            <button id="restore">重置/关</button>
+          </div>
+
+          <div class="hint">
+            使用来自 jsDelivr 的 opencc-wasm 0.8.2 版本。跳过输入内容、代码块和预格式化文本。
+          </div>
+        </div>
+      </div>
+    `;
+
+    const select = root.getElementById("config");
+
+    for (const [value, label] of CONFIGS) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      select.appendChild(option);
+    }
+
+    ui = {
+      host,
+      root,
+      status: root.getElementById("status"),
+      select,
+      toggle: root.getElementById("toggle"),
+      convert: root.getElementById("convert"),
+      restore: root.getElementById("restore"),
+      collapse: root.getElementById("collapse"),
+      body: root.getElementById("body"),
+    };
+
+    ui.select.addEventListener("change", () => {
+      setConfig(ui.select.value);
+    });
+
+    ui.toggle.addEventListener("click", () => {
+      setEnabled(!enabled);
+    });
+
+    ui.convert.addEventListener("click", () => {
+      if (!enabled) setEnabled(true);
+      else scheduleFullScan(0);
+    });
+
+    ui.restore.addEventListener("click", () => {
+      setEnabled(false);
+    });
+
+    ui.collapse.addEventListener("click", () => {
+      collapsed = !collapsed;
+      storeSet("collapsed", collapsed);
+      refreshControls();
+    });
+
+    refreshControls();
+    setStatus(latestStatus, latestBusy, latestError);
+  }
+
+  function refreshControls() {
+    if (!ui) return;
+
+    ui.select.value = config;
+
+    ui.toggle.textContent = enabled ? "关" : "开";
+    ui.toggle.classList.toggle("danger", enabled);
+    ui.toggle.classList.toggle("primary", !enabled);
+
+    ui.body.hidden = collapsed;
+    ui.collapse.textContent = collapsed ? "▴" : "−";
+    ui.collapse.title = collapsed ? "展开" : "折叠";
+  }
+
+  function setStatus(text, busy = false, error = false) {
+    latestStatus = text;
+    latestBusy = busy;
+    latestError = error;
+
+    if (!ui || !ui.status) return;
+
+    ui.status.textContent = text;
+    ui.status.classList.toggle("busy", busy);
+    ui.status.classList.toggle("error", error);
+  }
 })();
