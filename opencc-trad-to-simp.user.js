@@ -560,7 +560,7 @@
           nodeStates.delete(node);
         }
       }
-    }, 5000);
+    }, 2000);
   }
 
   function clearScheduledTimers() {
