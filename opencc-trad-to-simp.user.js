@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ChatGPT
 // @match        http://*/*
@@ -111,6 +111,7 @@
   let latestBusy = false;
   let latestError = false;
   let ui = null;
+  let statusBusyTimer = 0;
 
   const observer = new MutationObserver(handleMutations);
 
@@ -926,6 +927,8 @@
     ui.collapse.title = collapsed ? "展开" : "折叠";
   }
 
+
+  // 替换 setStatus 函数：
   function setStatus(text, busy = false, error = false) {
     latestStatus = text;
     latestBusy = busy;
@@ -933,8 +936,30 @@
 
     if (!ui || !ui.status) return;
 
+    // 如果是 busy 状态，延迟渲染以避免缓存命中时的瞬间闪烁
+    if (busy) {
+      if (!statusBusyTimer) {
+        statusBusyTimer = setTimeout(() => {
+          statusBusyTimer = 0;
+          // 只有当状态仍然是 busy 时才渲染
+          if (latestBusy) {
+            ui.status.textContent = latestStatus;
+            ui.status.classList.add("busy");
+            ui.status.classList.remove("error");
+          }
+        }, 150);
+      }
+      return;
+    }
+
+    // 非 busy 状态：取消待渲染的 busy，立即显示最终状态
+    if (statusBusyTimer) {
+      clearTimeout(statusBusyTimer);
+      statusBusyTimer = 0;
+    }
+
     ui.status.textContent = text;
-    ui.status.classList.toggle("busy", busy);
+    ui.status.classList.toggle("busy", false);
     ui.status.classList.toggle("error", error);
   }
 })();
