@@ -314,7 +314,7 @@
       acceptNode(node) {
         return shouldProcessTextNode(node)
           ? NodeFilter.FILTER_ACCEPT
-          : NodeFilter.FILTER_REJECT;
+          : NodeFilter.FILTER_SKIP;
       },
     });
 
