@@ -6,6 +6,7 @@
 // @author       You
 // @match        *://www.mianfeixiaoshuoyueduwang.com/book/*/*
 // @match        *://mianfeixiaoshuoyueduwang.com/book/*/*
+// @run-at       document-end
 // @grant        none
 // ==/UserScript==
 
@@ -57,11 +58,5 @@
         // 点击阅读按钮
         readBtn.click();
     }
-
-    // DOMContentLoaded 已过则直接执行，否则等待
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', run);
-    } else {
         run();
-    }
 })();
