@@ -13,7 +13,10 @@ GM_addStyle(`
     body, p, div, span, h1, h2, h3, h4, h5, h6, a, li, td, th, input, textarea, button {
         font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif !important;
     }
-    code, pre, kbd, samp, .icon, [class*="icon"], [class*="Icon"], i[class], svg text {
-        font-family: inherit !important; 
+    code, pre, kbd, samp,
+    .icon, [class*="icon"], [class*="Icon"],
+    [class*="fa-"], [class*=" fa"], .fas, .far, .fal, .fab, .fad,
+    i[class], svg text {
+        font-family: revert !important;
     }
 `);
