@@ -606,6 +606,7 @@
 
     if (nextEnabled === enabled) {
       if (enabled) {
+        clearScheduledTimers();
         scheduleFullScan(0);
       } else {
         restoreOriginals();
@@ -617,6 +618,7 @@
     }
 
     generation++;
+    clearScheduledTimers();
 
     if (!nextEnabled) {
       // Process pending external page mutations before restoring originals.
