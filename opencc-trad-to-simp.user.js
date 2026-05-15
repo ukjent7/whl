@@ -573,6 +573,11 @@
       clearTimeout(fullScanTimer);
       fullScanTimer = 0;
     }
+    
+    if (pruneTimer) {
+      clearTimeout(pruneTimer);
+      pruneTimer = 0;
+    }
   }
 
   function restoreOriginals() {
