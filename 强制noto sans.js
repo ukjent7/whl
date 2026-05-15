@@ -14,6 +14,6 @@ GM_addStyle(`
         font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif !important;
     }
     code, pre, kbd, samp, .icon, [class*="icon"], [class*="Icon"], i[class], svg text {
-        font-family: inherit !important; /* 或保持原样 */
+        font-family: inherit !important; 
     }
 `);
