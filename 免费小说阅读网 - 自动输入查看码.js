@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         免费小说阅读网 - 自动输入查看码
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  自动从页面或URL提取查看码并点击阅读按钮，展示完整章节内容
 // @author       You
 // @match        *://www.mianfeixiaoshuoyueduwang.com/book/*/*
