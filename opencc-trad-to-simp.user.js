@@ -778,7 +778,7 @@
           display: block;
           margin-bottom: 5px;
           font-size: 12px;
-          font-weight: 650;
+          font-weight: 600;
           color: #374151;
         }
 
