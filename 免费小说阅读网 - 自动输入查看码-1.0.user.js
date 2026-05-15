@@ -51,7 +51,7 @@
         codeInput.value = code;
 
         // 触发原生 input/change 事件（防止某些框架只监听事件而非 .value）
-        codeInput.dispatchEvent(new Event('input', { bubbles: true }));
+        codeInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
         codeInput.dispatchEvent(new Event('change', { bubbles: true }));
 
         // 点击阅读按钮
