@@ -50,6 +50,7 @@ jobs:
 
 # ── 新增：抖音域名规则合并并转换为 SmartDNS nameserver 格式 ──────────────
   convert-douyin-rules:
+    needs: merge
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
@@ -75,9 +76,7 @@ jobs:
           #    - 跳过注释行（# 开头）、空行、include:/attr: 指令
           #    - 每行格式可能是 "domain.com" 或 "domain.com @tag"，取第一列即可
           grep -v '^#' douyin-v2fly.txt \
-            | grep -v '^$' \
-            | grep -v '^include:' \
-            | grep -v '^attr:' \
+            | grep -Ev '^(#|$|include:|attr:)' \
             | awk '{print $1}' \
             > v2fly_domains.txt
 
@@ -124,6 +123,7 @@ jobs:
           
   # ── 新增：拉取 AWAvenue 广告规则并转换为 SmartDNS 格式 ──────────────────
   convert-ad-rules:
+    needs: convert-douyin-rules
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
