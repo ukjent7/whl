@@ -862,7 +862,7 @@
           </div>
 
           <div class="hint">
-            使用来自 jsDelivr 的 opencc-wasm 0.8.2 版本。跳过输入内容、代码块和预格式化文本。
+            Open CC-WASM 0.8.2 
           </div>
         </div>
       </div>
