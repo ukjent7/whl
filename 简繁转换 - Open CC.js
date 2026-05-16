@@ -837,16 +837,11 @@
           background: #b91c1c;
         }
 
-        .hint {
-          margin-top: 8px;
-          font-size: 11px;
-          color: #6b7280;
-        }
       </style>
 
       <div class="card">
         <div class="top">
-          <div class="brand">OpenCC-WASM</div>
+          <div class="brand">OpenCC-WASM 0.8.2</div>
           <div id="status" class="status"></div>
           <button id="collapse" class="icon" title="Collapse">−</button>
         </div>
@@ -859,10 +854,6 @@
             <button id="toggle"></button>
             <button id="convert">立即转换</button>
             <button id="restore">重置/关</button>
-          </div>
-
-          <div class="hint">
-            Open CC-WASM 0.8.2 
           </div>
         </div>
       </div>
