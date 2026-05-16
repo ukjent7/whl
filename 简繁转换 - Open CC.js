@@ -608,10 +608,7 @@
       if (enabled) {
         clearScheduledTimers();
         scheduleFullScan(0);
-      } else {
-        restoreOriginals();
-        setStatus("Off");
-      }
+      } 
 
       refreshControls();
       return;
