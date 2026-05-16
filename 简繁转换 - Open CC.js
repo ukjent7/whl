@@ -1,11 +1,10 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      1.1.0
+// @version      1.1.1
 // @description  Convert webpage Chinese text using opencc-wasm.
-// @author       ChatGPT
-// @match        http://*/*
-// @match        https://*/*
+// @author       ChatGPT-5.5-xhigh
+// @match        https://czbooks.net/*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_getValue
