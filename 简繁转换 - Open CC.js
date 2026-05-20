@@ -8,8 +8,7 @@
 // @match        https://baijiahao.baidu.com/*
 // @run-at       document-idle
 // @noframes
-// @grant        GM_getValue
-// @grant        GM_setValue
+// @grant        none
 // @connect      cdn.jsdelivr.net
 // ==/UserScript==
 
@@ -140,15 +139,11 @@
   }
 
   function storeGet(key, fallback) {
-    const fullKey = STORE_PREFIX + key;
-    try { if (typeof GM_getValue === "function") return GM_getValue(fullKey, fallback); } catch (_) {}
-    try { const raw = localStorage.getItem(fullKey); return raw == null ? fallback : JSON.parse(raw); } catch (_) { return fallback; }
+    try { const raw = localStorage.getItem(STORE_PREFIX + key); return raw == null ? fallback : JSON.parse(raw); } catch (_) { return fallback; }
   }
 
   function storeSet(key, value) {
-    const fullKey = STORE_PREFIX + key;
-    try { if (typeof GM_setValue === "function") { GM_setValue(fullKey, value); return; } } catch (_) {}
-    try { localStorage.setItem(fullKey, JSON.stringify(value)); } catch (_) {}
+    try { localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value)); } catch (_) {}
   }
 
   // ── Converter cache ──────────────────────────────────────────────────────────
