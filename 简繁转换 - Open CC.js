@@ -10,7 +10,6 @@
 // @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @grant        GM_registerMenuCommand
 // @connect      cdn.jsdelivr.net
 // ==/UserScript==
 
@@ -123,7 +122,6 @@
     await domReady();
     if (!document.body) return;
     createPanel();
-    registerMenus();
     if (enabled) { startObserving(); scheduleFullScan(0); }
     else setStatus("Off");
   }
@@ -151,15 +149,6 @@
     const fullKey = STORE_PREFIX + key;
     try { if (typeof GM_setValue === "function") { GM_setValue(fullKey, value); return; } } catch (_) {}
     try { localStorage.setItem(fullKey, JSON.stringify(value)); } catch (_) {}
-  }
-
-  // ── Menus ────────────────────────────────────────────────────────────────────
-
-  function registerMenus() {
-    if (typeof GM_registerMenuCommand !== "function") return;
-    GM_registerMenuCommand("OpenCC-WASM: Toggle conversion", () => setEnabled(!enabled));
-    GM_registerMenuCommand("OpenCC-WASM: Convert page now", () => { if (!enabled) setEnabled(true); else scheduleFullScan(0); });
-    GM_registerMenuCommand("OpenCC-WASM: Restore original / turn off", () => setEnabled(false));
   }
 
   // ── Converter cache ──────────────────────────────────────────────────────────
