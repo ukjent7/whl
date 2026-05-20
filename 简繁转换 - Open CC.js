@@ -662,11 +662,12 @@
       const rect = ui.host.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
       applyPosition(startLeft, startTop);
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
       e.preventDefault();
     }
 
     function onMove(e) {
-      if (!dragging) return;
       const dx = e.clientX - startX, dy = e.clientY - startY;
       if (!moved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
       moved = true;
@@ -674,7 +675,8 @@
     }
 
     function onUp() {
-      if (!dragging) return;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
       dragging = false;
       if (moved) {
         const rect = ui.host.getBoundingClientRect();
@@ -688,8 +690,6 @@
 
     ui.fab.addEventListener("mousedown", startDrag);
     ui.header.addEventListener("mousedown", startDrag);
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
   }
 
 })();
