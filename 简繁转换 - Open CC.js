@@ -42,7 +42,7 @@
       ["hk2s",         "hk2s — 香港繁体 → 简体"],
       ["t2s",          "t2s — 繁体 → 简体"],
     ]},
-    { id: "tw2hk", label: "繁体互通", color: "#8b5cf6", configs: [
+    { id: "tw2hk", label: "繁→繁", color: "#8b5cf6", configs: [
       ["hk2t",  "hk2t — 香港繁体 → 繁体"],
       ["t2hk",  "t2hk — 繁体 → 香港繁体"],
       ["tw2t",  "tw2t — 台湾繁体 → 繁体"],
