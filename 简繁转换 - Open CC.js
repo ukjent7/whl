@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.1.0
+// @version      3.2.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
+// @match        https://baijiahao.baidu.com/*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_getValue
@@ -476,17 +477,14 @@
 .header-dot.on{background:var(--success)}
 .header-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}
 .header-dot.error{background:var(--danger)}
-.header-label{font-size:11px;font-weight:700;color:var(--text-2);letter-spacing:.08em;text-transform:uppercase;flex-shrink:0}
-.header-status{flex:1;font-size:10.5px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:ui-monospace,"SF Mono",monospace;transition:color .3s}
+.header-label{font-size:13px;font-weight:700;color:var(--text-2);letter-spacing:.08em;text-transform:uppercase;flex-shrink:0}
+.header-status{flex:1;font-size:12px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:ui-monospace,"SF Mono",monospace;transition:color .3s}
 .header-status.busy{color:var(--warning)}
 .header-status.error{color:var(--danger)}
-.collapse-btn{width:22px;height:22px;border:1px solid var(--border);border-radius:7px;background:var(--bg-card);color:var(--text-3);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;flex-shrink:0}
-.collapse-btn:hover{background:rgba(255,255,255,.08);color:var(--text-2)}
-.collapse-btn svg{width:11px;height:11px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
 .body{padding:10px 0 12px;display:flex;height:200px}
-.body-left{width:66px;flex-shrink:0;display:flex;flex-direction:column;padding:0 8px;gap:4px;border-right:1px solid var(--border)}
+.body-left{width:78px;flex-shrink:0;display:flex;flex-direction:column;padding:0 8px;gap:4px;border-right:1px solid var(--border)}
 .categories{display:flex;flex-direction:column;gap:4px;flex:1}
-.cat-btn{flex:1;border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--text-3);font-family:inherit;font-size:11px;font-weight:500;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1.25;text-align:center}
+.cat-btn{flex:1;border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--text-3);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1.25;text-align:center}
 .cat-btn:hover{border-color:var(--border-strong);color:var(--text-2);background:var(--bg-card)}
 .cat-btn.active{color:#fff;border-color:transparent;background:var(--cat-color,var(--primary))}
 .body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}
@@ -502,20 +500,20 @@
 .config-item.selected .config-radio{border-color:var(--primary)}
 .config-radio::after{content:"";width:5px;height:5px;border-radius:50%;background:var(--primary);opacity:0;transition:opacity .15s}
 .config-item.selected .config-radio::after{opacity:1}
-.config-label{font-size:11px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}
+.config-label{font-size:13px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}
 .config-item.selected .config-label{color:var(--text-1)}
-.btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s;display:flex;align-items:center;justify-content:center}
+.btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s;display:flex;align-items:center;justify-content:center}
 .btn:hover{opacity:.85}
 .btn:active{transform:scale(.97)}
 .btn-primary{background:linear-gradient(135deg,#6d5af0,#9b6fff);border-color:rgba(150,120,255,.25);color:#fff}
 .btn-danger{background:linear-gradient(135deg,#e8415a,#f07);border-color:rgba(240,80,100,.25);color:#fff}
 .footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.footer-version{font-size:9.5px;color:var(--text-3);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
-.footer-hint{font-size:9px;color:var(--text-3);opacity:.5}
+.footer-version{font-size:11px;color:var(--text-3);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
+.footer-hint{font-size:10px;color:var(--text-3);opacity:.5}
 </style>
 <div class="fab" id="fab" title="OpenCC-WASM"><div class="fab-inner">文</div><div class="fab-dot" id="fabDot"></div></div>
 <div class="panel" id="panel" hidden>
-<div class="header" id="header"><div class="header-dot" id="headerDot"></div><span class="header-label">OpenCC</span><div class="header-status" id="status"></div><button class="collapse-btn" id="collapse" title="收起"><svg viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6"/></svg></button></div>
+<div class="header" id="header"><div class="header-dot" id="headerDot"></div><span class="header-label">OpenCC</span><div class="header-status" id="status"></div></div>
 <div id="body" class="body"><div class="body-left"><div class="categories" id="categories"></div></div><div class="body-right"><div class="config-list" id="configList"></div><button id="toggle" class="btn"></button></div></div>
 <div class="footer"><span class="footer-version">opencc-wasm 0.8.2</span><span class="footer-hint">拖拽移动</span></div>
 </div>`;
@@ -526,7 +524,6 @@
       configList: root.getElementById("configList"),
       categories: root.getElementById("categories"),
       toggle:     root.getElementById("toggle"),
-      collapse:   root.getElementById("collapse"),
       body:       root.getElementById("body"),
       fab:        root.getElementById("fab"),
       panel:      root.getElementById("panel"),
@@ -551,7 +548,17 @@
     updateCategoryTabs();
 
     ui.toggle.addEventListener("click", () => setEnabled(!enabled));
-    ui.collapse.addEventListener("click", () => { collapsed = true; storeSet("collapsed", collapsed); refreshControls(); });
+
+    // Click outside the panel to collapse it
+    document.addEventListener("mousedown", function onOutsideClick(e) {
+      if (collapsed) return;
+      // Check if the click target is inside our shadow host
+      if (!ui.host.contains(e.target) && !ui.host.shadowRoot.contains(e.composedPath()[0])) {
+        collapsed = true;
+        storeSet("collapsed", collapsed);
+        refreshControls();
+      }
+    }, true);
 
     setupDrag();
     refreshControls();
@@ -649,7 +656,7 @@
   function setupDrag() {
     if (!ui) return;
     let dragging = false, startX, startY, startLeft, startTop, moved = false;
-    const DRAG_THRESHOLD = 5;
+    const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
     if (savedPos && typeof savedPos.left === "number") applyPosition(savedPos.left, savedPos.top);
 
@@ -665,7 +672,7 @@
     }
 
     function startDrag(e) {
-      if (e.button !== 0 || e.target.closest(".collapse-btn")) return;
+      if (e.button !== 0) return;
       dragging = true; moved = false;
       startX = e.clientX; startY = e.clientY;
       const rect = ui.host.getBoundingClientRect();
