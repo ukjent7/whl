@@ -20,14 +20,11 @@
   const OPENCC_ESM_URL = "https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js";
   const DEFAULT_CONFIG = "s2twp";
   const DEFAULT_ENABLED = true;
-  const CHUNK_SIZE = 80;           // text nodes per processing batch
+  const CHUNK_SIZE = 80;
   const PROCESS_DEBOUNCE_MS = 80;
   const FULL_SCAN_DEBOUNCE_MS = 60;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
   const STORE_PREFIX = "openccWasmUserscript.";
-  // Mixed simplified + traditional so the warmup convert is a non-trivial no-op for
-  // every config direction: s2t configs see simplified input, t2s configs see the
-  // traditional characters, and both halves exercise real dictionary look-ups.
   const WARMUP_TEXT = "服務器軟件繁體中文简体汉字";
 
   const CONFIG_GROUPS = [
@@ -71,7 +68,6 @@
     "textarea", "input", "select", "option", "code", "pre", "kbd", "samp", "svg", "math", "canvas",
   ].join(",");
 
-  // Han script regex (with graceful fallback for old engines)
   const HAS_HAN = (() => {
     try { return new RegExp("\\p{Script=Han}", "u"); }
     catch (_) { return /[\u3400-\u9fff\uf900-\ufaff]/; }
@@ -83,10 +79,9 @@
   let enabled = Boolean(storeGet("enabled", DEFAULT_ENABLED));
   let collapsed = Boolean(storeGet("collapsed", false));
 
-  // Single promise Map — resolved promises are kept so cache hits are free
   const converterPromises = new Map();
 
-  const nodeStates = new Map();   // WeakMap not viable: need iteration for restore
+  const nodeStates = new Map();
 
   setInterval(() => {
     for (const [node] of nodeStates) {
@@ -99,7 +94,7 @@
   let queue = [];
   let queuedNodes = new WeakSet();
   let processing = false;
-  let writingBack = false;   // true while processQueue is writing nodeValue; guards handleMutations
+  let writingBack = false;
   let generation = 0;
   let observing = false;
   let processTimer = 0;
@@ -151,8 +146,6 @@
   }
 
   // ── Converter cache ──────────────────────────────────────────────────────────
-  // Uses a single promise-per-config Map. Once resolved the promise stays cached
-  // so subsequent accesses are a synchronous Map lookup + microtask hop.
 
   async function getConverter(configName) {
     if (converterPromises.has(configName)) return converterPromises.get(configName);
@@ -160,12 +153,10 @@
       const mod = await import(OPENCC_ESM_URL);
       const OpenCC = mod.default || mod;
       const converter = OpenCC.Converter({ config: configName });
-      await converter(WARMUP_TEXT); // trigger lazy dict load
+      await converter(WARMUP_TEXT);
       return converter;
     })();
-    // Store immediately so concurrent callers share the same promise
     converterPromises.set(configName, promise);
-    // On failure, evict so next call retries
     promise.catch(() => converterPromises.delete(configName));
     return promise;
   }
@@ -249,9 +240,6 @@
     processTimer = setTimeout(() => { processTimer = 0; void processQueue(); }, delay);
   }
 
-  // Yield one task turn — uses setTimeout(0) which reliably yields a frame.
-  // requestIdleCallback is intentionally avoided here: its callback may be
-  // delayed arbitrarily on busy pages, causing stutter between chunks.
   function yieldToBrowser() {
     return new Promise(resolve => setTimeout(resolve, 0));
   }
@@ -271,7 +259,6 @@
       if (!enabled || generation !== myGeneration || config !== myConfig) return;
 
       while (enabled && generation === myGeneration && config === myConfig && queue.length) {
-        // Build a chunk of valid nodes to convert
         const chunk = [];
         while (queue.length && chunk.length < CHUNK_SIZE) {
           const node = queue.shift();
@@ -284,9 +271,6 @@
         }
         if (!chunk.length) { await yieldToBrowser(); continue; }
 
-        // --- FIX: check generation before expensive convert, convert serially ---
-        // Serial conversion avoids piling up concurrent WASM calls.
-        // Each await is a microtask; generation is checked between items.
         setStatus(`Converting… ${queue.length} left`, true);
         const results = [];
         for (const item of chunk) {
@@ -303,10 +287,6 @@
 
         if (!enabled || generation !== myGeneration || config !== myConfig) break;
 
-        // Write converted text back to DOM with observer paused.
-        // writingBack=true provides a second, explicit guard: even if a future
-        // change calls startObserving() before the write completes, handleMutations
-        // will see writingBack and skip resetting the saved original.
         stopObserving(true);
         writingBack = true;
         try {
@@ -347,8 +327,6 @@
       if (mutation.type === "characterData") {
         const node = mutation.target;
         if (shouldProcessTextNode(node)) {
-          // Skip mutations that we ourselves produced; resetting the saved original
-          // here would silently discard the original text we need for restoration.
           if (!writingBack && enqueueTextNode(node, true)) enqueued++;
         } else {
           nodeStates.delete(node);
@@ -531,7 +509,6 @@
       activeCategory: findGroupForConfig(config),
     };
 
-    // Build category tab buttons
     for (const group of CONFIG_GROUPS) {
       const btn = document.createElement("button");
       btn.className = "cat-btn";
@@ -547,10 +524,8 @@
 
     ui.toggle.addEventListener("click", () => setEnabled(!enabled));
 
-    // Click outside the panel to collapse it
     document.addEventListener("mousedown", function onOutsideClick(e) {
       if (collapsed) return;
-      // Check if the click target is inside our shadow host
       if (!ui.host.contains(e.target) && !ui.host.shadowRoot.contains(e.composedPath()[0])) {
         collapsed = true;
         storeSet("collapsed", collapsed);
@@ -563,13 +538,12 @@
     setStatus(latestStatus, latestBusy, latestError);
   }
 
-  // Render config items for the currently active category tab
   function populateConfigList() {
     const group = CONFIG_GROUPS.find(g => g.id === ui.activeCategory) || CONFIG_GROUPS[0];
     const list = ui.configList;
     list.innerHTML = "";
     list.classList.remove("switching");
-    void list.offsetWidth; // force reflow to restart animation
+    void list.offsetWidth;
     list.classList.add("switching");
     for (const [value, label] of group.configs) {
       const item = document.createElement("div");
@@ -604,7 +578,6 @@
     else updateConfigListSelection();
     updateCategoryTabs();
 
-    // Collapse / expand panel
     if (collapsed) {
       if (!ui.panel.hidden && !collapsing) {
         collapsing = true;
@@ -659,17 +632,12 @@
     if (savedPos && typeof savedPos.left === "number") applyPosition(savedPos.left, savedPos.top);
 
     function applyPosition(left, top) {
-      // Bug 1 fix: clamp the host's left edge so the *panel* (width 280px,
-      // position:absolute; right:0 inside the 52px host) stays fully on-screen.
-      // When host.left = L, the panel's left edge is at L + 52 - 280 = L - 228.
-      // To keep that ≥ 0 we need L ≥ 228, i.e. minL = panelWidth - hostWidth.
       const hostRect  = ui.host.getBoundingClientRect();
       const panelEl   = ui.panel;
-      // Use the panel's own offsetWidth (280) so the constant survives CSS changes.
       const panelW    = panelEl.offsetWidth || 280;
-      const hostW     = hostRect.width;       // 52px
+      const hostW     = hostRect.width;
       const hostH     = hostRect.height;
-      const minL = panelW - hostW;            // left edge of host where panel left == 0
+      const minL = panelW - hostW;
       const maxL = Math.max(minL, window.innerWidth  - hostW);
       const maxT = Math.max(0,    window.innerHeight - hostH);
       ui.host.style.right  = "auto";
@@ -678,7 +646,6 @@
       ui.host.style.top    = Math.min(top,  maxT) + "px";
     }
 
-    // Bug 2 fix: re-clamp whenever the viewport shrinks (or grows).
     window.addEventListener("resize", () => {
       const rect = ui.host.getBoundingClientRect();
       applyPosition(rect.left, rect.top);
