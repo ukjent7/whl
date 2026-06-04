@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.2.0
+// @version      3.2.8
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -25,7 +25,10 @@
   const FULL_SCAN_DEBOUNCE_MS = 60;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
   const STORE_PREFIX = "openccWasmUserscript.";
-  const WARMUP_TEXT = "服务器软件简体中文";  // pure simplified for warmup clarity
+  // Mixed simplified + traditional so the warmup convert is a non-trivial no-op for
+  // every config direction: s2t configs see simplified input, t2s configs see the
+  // traditional characters, and both halves exercise real dictionary look-ups.
+  const WARMUP_TEXT = "服務器軟件繁體中文简体汉字";
 
   const CONFIG_GROUPS = [
     { id: "s2t", label: "简→繁", color: "#f59e0b", configs: [
@@ -91,11 +94,12 @@
         nodeStates.delete(node);
       }
     }
-  }, 30000);
+  }, 8000);
 
   let queue = [];
   let queuedNodes = new WeakSet();
   let processing = false;
+  let writingBack = false;   // true while processQueue is writing nodeValue; guards handleMutations
   let generation = 0;
   let observing = false;
   let processTimer = 0;
@@ -299,8 +303,12 @@
 
         if (!enabled || generation !== myGeneration || config !== myConfig) break;
 
-        // Write converted text back to DOM with observer paused
+        // Write converted text back to DOM with observer paused.
+        // writingBack=true provides a second, explicit guard: even if a future
+        // change calls startObserving() before the write completes, handleMutations
+        // will see writingBack and skip resetting the saved original.
         stopObserving(true);
+        writingBack = true;
         try {
           for (let i = 0; i < results.length; i++) {
             if (!enabled || generation !== myGeneration || config !== myConfig) break;
@@ -313,6 +321,7 @@
             item.state.convertedText = convertedText;
           }
         } finally {
+          writingBack = false;
           if (enabled) startObserving();
         }
         await yieldToBrowser();
@@ -337,8 +346,13 @@
     for (const mutation of mutations) {
       if (mutation.type === "characterData") {
         const node = mutation.target;
-        if (shouldProcessTextNode(node)) { if (enqueueTextNode(node, true)) enqueued++; }
-        else nodeStates.delete(node);
+        if (shouldProcessTextNode(node)) {
+          // Skip mutations that we ourselves produced; resetting the saved original
+          // here would silently discard the original text we need for restoration.
+          if (!writingBack && enqueueTextNode(node, true)) enqueued++;
+        } else {
+          nodeStates.delete(node);
+        }
       } else if (mutation.type === "childList") {
         for (const added of mutation.addedNodes) enqueued += collectTextNodes(added, false);
         if (mutation.removedNodes.length) sawRemovedNodes = true;
@@ -639,25 +653,40 @@
 
   function setupDrag() {
     if (!ui) return;
-    let dragging = false, startX, startY, startLeft, startTop, moved = false;
+    let startX, startY, startLeft, startTop, moved = false;
     const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
     if (savedPos && typeof savedPos.left === "number") applyPosition(savedPos.left, savedPos.top);
 
     function applyPosition(left, top) {
-      // Clamp to viewport on every apply, handles resize edge case
-      const rect = ui.host.getBoundingClientRect(); // 或 shadow root 的根元素
-      const maxL = Math.max(0, window.innerWidth  - rect.width);
-      const maxT = Math.max(0, window.innerHeight - rect.height);
+      // Bug 1 fix: clamp the host's left edge so the *panel* (width 280px,
+      // position:absolute; right:0 inside the 52px host) stays fully on-screen.
+      // When host.left = L, the panel's left edge is at L + 52 - 280 = L - 228.
+      // To keep that ≥ 0 we need L ≥ 228, i.e. minL = panelWidth - hostWidth.
+      const hostRect  = ui.host.getBoundingClientRect();
+      const panelEl   = ui.panel;
+      // Use the panel's own offsetWidth (280) so the constant survives CSS changes.
+      const panelW    = panelEl.offsetWidth || 280;
+      const hostW     = hostRect.width;       // 52px
+      const hostH     = hostRect.height;
+      const minL = panelW - hostW;            // left edge of host where panel left == 0
+      const maxL = Math.max(minL, window.innerWidth  - hostW);
+      const maxT = Math.max(0,    window.innerHeight - hostH);
       ui.host.style.right  = "auto";
       ui.host.style.bottom = "auto";
-      ui.host.style.left   = Math.min(left, maxL) + "px";
+      ui.host.style.left   = Math.max(minL, Math.min(left, maxL)) + "px";
       ui.host.style.top    = Math.min(top,  maxT) + "px";
     }
 
+    // Bug 2 fix: re-clamp whenever the viewport shrinks (or grows).
+    window.addEventListener("resize", () => {
+      const rect = ui.host.getBoundingClientRect();
+      applyPosition(rect.left, rect.top);
+    });
+
     function startDrag(e) {
       if (e.button !== 0) return;
-      dragging = true; moved = false;
+      moved = false;
       startX = e.clientX; startY = e.clientY;
       const rect = ui.host.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
@@ -677,7 +706,6 @@
     function onUp() {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
-      dragging = false;
       if (moved) {
         const rect = ui.host.getBoundingClientRect();
         storeSet("panelPos", { left: rect.left, top: rect.top });
