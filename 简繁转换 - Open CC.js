@@ -24,7 +24,7 @@
   const SWEEP_INTERVAL_MS = 8000;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
   const STORE_PREFIX = "openccWasmUserscript.";
-  const WARMUP_TEXT = "伺服器发现";
+  const WARMUP_TEXT = "伺服器发现資訊只鸡";
   const STATUS_ON_PREFIX = "On · ";
 
   const CONFIG_GROUPS = [
