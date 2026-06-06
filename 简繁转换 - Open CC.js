@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.2.12
+// @version      3.3.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -83,16 +83,14 @@
 
   const converterPromises = new Map();
 
-  const nodeStates = new Map();
-  const nodeRefs = new Map();
+  // Single map: key → { state: {...}, ref: WeakRef }
+  // Replaces the previous two-map pattern (nodeStates + nodeRefs) with one unified structure.
+  const nodeEntries = new Map();
 
   setInterval(() => {
-    for (const [key, ref] of nodeRefs) {
-      const node = ref.deref();
-      if (!node || !node.isConnected) {
-        nodeRefs.delete(key);
-        nodeStates.delete(key);
-      }
+    for (const [key, entry] of nodeEntries) {
+      const node = entry.ref.deref();
+      if (!node || !node.isConnected) nodeEntries.delete(key);
     }
   }, SWEEP_INTERVAL_MS);
 
@@ -186,28 +184,30 @@
 
   function rememberOriginal(node, resetOriginal = false) {
     const key = nodeKey(node);
-    let state = nodeStates.get(key);
-    if (!state || resetOriginal) {
-      state = {
+    let entry = nodeEntries.get(key);
+    if (!entry) {
+      entry = {
+        state: { original: node.nodeValue, version: 1, convertedConfig: null, convertedText: null },
+        ref: new WeakRef(node),
+      };
+      nodeEntries.set(key, entry);
+    } else if (resetOriginal) {
+      entry.state = {
         original: node.nodeValue,
-        version: state ? state.version + 1 : 1,
+        version: entry.state.version + 1,
         convertedConfig: null,
         convertedText: null,
       };
-      nodeStates.set(key, state);
-      if (!nodeRefs.has(key)) nodeRefs.set(key, new WeakRef(node));
     }
-    return state;
+    return entry.state;
   }
 
   function getNodeState(node) {
-    return nodeStates.get(nodeKey(node));
+    return nodeEntries.get(nodeKey(node))?.state;
   }
 
   function deleteNodeState(node) {
-    const key = nodeKey(node);
-    nodeStates.delete(key);
-    nodeRefs.delete(key);
+    nodeEntries.delete(nodeKey(node));
   }
 
   function enqueueTextNode(node, resetOriginal = false) {
@@ -227,9 +227,25 @@
     ) return 0;
     if (root.nodeType === Node.ELEMENT_NODE && shouldSkipElement(root)) return 0;
     let count = 0;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) { return shouldProcessTextNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP; }
-    });
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+      {
+        acceptNode(node) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            // Reject the entire subtree for skipped elements — never descend into them.
+            if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_SKIP; // element itself is not a text node; keep descending
+          }
+          // TEXT_NODE: run the cheap checks (Han test + parent skip) inline.
+          const text = node.nodeValue;
+          if (!text || !HAS_HAN.test(text)) return NodeFilter.FILTER_SKIP;
+          // Parent was already validated by the ELEMENT branch above (not rejected),
+          // so no need for another .closest() call here.
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
     let node;
     while ((node = walker.nextNode())) if (enqueueTextNode(node, resetOriginal)) count++;
     return count;
@@ -243,13 +259,28 @@
     fullScanTimer = setTimeout(() => {
       fullScanTimer = 0;
       if (!enabled || !document.body) return;
+
+      // Pause the observer so the DOM walk doesn't race with live mutation callbacks.
+      // Flush any pending records first so we don't lose them.
+      stopObserving(true);
+
       const prevQueue = queue;
       const prevQueued = queuedNodes;
       queue = [];
       queuedNodes = new WeakSet();
       const count = collectTextNodes(document.body, false);
-      if (count > 0) { setStatus(`Queued ${count} text nodes`, true); scheduleProcess(0); }
-      else { queue = prevQueue; queuedNodes = prevQueued; setStatus(STATUS_ON_PREFIX + config); }
+
+      if (count > 0) {
+        setStatus(`Queued ${count} text nodes`, true);
+        scheduleProcess(0);
+      } else {
+        queue = prevQueue;
+        queuedNodes = prevQueued;
+        setStatus(STATUS_ON_PREFIX + config);
+      }
+
+      // Resume observation after the synchronous walk is done.
+      if (enabled) startObserving();
     }, delay);
   }
 
@@ -380,12 +411,9 @@
     if (pruneTimer) return;
     pruneTimer = setTimeout(() => {
       pruneTimer = 0;
-      for (const [key, ref] of nodeRefs) {
-        const node = ref.deref();
-        if (!node || !node.isConnected) {
-          nodeRefs.delete(key);
-          nodeStates.delete(key);
-        }
+      for (const [key, entry] of nodeEntries) {
+        const node = entry.ref.deref();
+        if (!node || !node.isConnected) nodeEntries.delete(key);
       }
     }, PRUNE_DELAY_MS);
   }
@@ -399,15 +427,13 @@
   function restoreOriginals() {
     clearScheduledTimers();
     stopObserving(false);
-    for (const [key, ref] of nodeRefs) {
-      const node = ref.deref();
-      const state = nodeStates.get(key);
-      if (node && node.isConnected && state && node.nodeValue !== state.original) {
-        node.nodeValue = state.original;
+    for (const [, entry] of nodeEntries) {
+      const node = entry.ref.deref();
+      if (node && node.isConnected && node.nodeValue !== entry.state.original) {
+        node.nodeValue = entry.state.original;
       }
     }
-    nodeStates.clear();
-    nodeRefs.clear();
+    nodeEntries.clear();
     clearQueue();
   }
 
@@ -554,15 +580,20 @@
 
     ui.toggle.addEventListener("click", () => setEnabled(!enabled));
 
-    const onOutsideClick = (e) => {
-      if (collapsed) return;
-      if (!ui.host.contains(e.target) && !ui.host.shadowRoot.contains(e.composedPath()[0])) {
-        collapsed = true;
-        storeSet("collapsed", collapsed);
-        refreshControls();
-      }
-    };
-    document.addEventListener("mousedown", onOutsideClick, { capture: false });
+    // Guard: only attach once so SPA re-runs of document-idle don't stack listeners.
+    if (!createPanel._outsideClickBound) {
+      createPanel._outsideClickBound = true;
+      const onOutsideClick = (e) => {
+        if (collapsed) return;
+        if (!ui || !ui.host) return;
+        if (!ui.host.contains(e.target) && !ui.host.shadowRoot.contains(e.composedPath()[0])) {
+          collapsed = true;
+          storeSet("collapsed", collapsed);
+          refreshControls();
+        }
+      };
+      document.addEventListener("mousedown", onOutsideClick, { capture: false });
+    }
 
     setupDrag();
     refreshControls();
