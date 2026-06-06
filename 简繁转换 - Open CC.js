@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.2.8
+// @version      3.2.12
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -9,13 +9,10 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
-// @connect      cdn.jsdelivr.net
 // ==/UserScript==
 
 (function () {
   "use strict";
-
-  // ── Constants ────────────────────────────────────────────────────────────────
 
   const OPENCC_ESM_URL = "https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js";
   const DEFAULT_CONFIG = "s2twp";
@@ -23,9 +20,12 @@
   const CHUNK_SIZE = 80;
   const PROCESS_DEBOUNCE_MS = 80;
   const FULL_SCAN_DEBOUNCE_MS = 60;
+  const PRUNE_DELAY_MS = 2000;
+  const SWEEP_INTERVAL_MS = 8000;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
   const STORE_PREFIX = "openccWasmUserscript.";
   const WARMUP_TEXT = "服務器軟件繁體中文简体汉字";
+  const STATUS_ON_PREFIX = "On · ";
 
   const CONFIG_GROUPS = [
     { id: "s2t", label: "简→繁", color: "#f59e0b", configs: [
@@ -63,6 +63,10 @@
   const CONFIGS = CONFIG_GROUPS.flatMap(g => g.configs);
   const CONFIG_VALUES = new Set(CONFIGS.map(([v]) => v));
 
+  const CONFIG_INDEX = new Map(
+    CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => [v, g.id]))
+  );
+
   const SKIP_SELECTOR = [
     `#${PANEL_ID}`, "[data-opencc-ignore]", "script", "style", "noscript", "template",
     "textarea", "input", "select", "option", "code", "pre", "kbd", "samp", "svg", "math", "canvas",
@@ -73,8 +77,6 @@
     catch (_) { return /[\u3400-\u9fff\uf900-\ufaff]/; }
   })();
 
-  // ── State ────────────────────────────────────────────────────────────────────
-
   let config = readConfig();
   let enabled = Boolean(storeGet("enabled", DEFAULT_ENABLED));
   let collapsed = Boolean(storeGet("collapsed", false));
@@ -82,14 +84,17 @@
   const converterPromises = new Map();
 
   const nodeStates = new Map();
+  const nodeRefs = new Map();
 
   setInterval(() => {
-    for (const [node] of nodeStates) {
-      if (!node.isConnected) {
-        nodeStates.delete(node);
+    for (const [key, ref] of nodeRefs) {
+      const node = ref.deref();
+      if (!node || !node.isConnected) {
+        nodeRefs.delete(key);
+        nodeStates.delete(key);
       }
     }
-  }, 8000);
+  }, SWEEP_INTERVAL_MS);
 
   let queue = [];
   let queuedNodes = new WeakSet();
@@ -100,15 +105,15 @@
   let processTimer = 0;
   let fullScanTimer = 0;
   let pruneTimer = 0;
-  let latestStatus = enabled ? `Starting · ${config}` : "Off";
+  let latestStatus = enabled ? STATUS_ON_PREFIX + config : "Off";
   let latestBusy = false;
   let latestError = false;
   let ui = null;
   let collapsing = false;
+  let converterErrorCount = 0;
+  const MAX_CONVERTER_ERRORS = 5;
 
   const observer = new MutationObserver(handleMutations);
-
-  // ── Boot ─────────────────────────────────────────────────────────────────────
 
   main().catch(err => {
     console.error("[OpenCC-WASM userscript] Fatal error:", err);
@@ -130,8 +135,6 @@
     return Promise.resolve();
   }
 
-  // ── Storage ──────────────────────────────────────────────────────────────────
-
   function readConfig() {
     const saved = storeGet("config", DEFAULT_CONFIG);
     return CONFIG_VALUES.has(saved) ? saved : DEFAULT_CONFIG;
@@ -144,8 +147,6 @@
   function storeSet(key, value) {
     try { localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value)); } catch (_) {}
   }
-
-  // ── Converter cache ──────────────────────────────────────────────────────────
 
   async function getConverter(configName) {
     if (converterPromises.has(configName)) return converterPromises.get(configName);
@@ -160,8 +161,6 @@
     promise.catch(() => converterPromises.delete(configName));
     return promise;
   }
-
-  // ── DOM helpers ──────────────────────────────────────────────────────────────
 
   function shouldSkipElement(el) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
@@ -178,8 +177,16 @@
     return true;
   }
 
+  let _nodeKeyCounter = 0;
+  const _nodeKeys = new WeakMap();
+  function nodeKey(node) {
+    if (!_nodeKeys.has(node)) _nodeKeys.set(node, ++_nodeKeyCounter);
+    return _nodeKeys.get(node);
+  }
+
   function rememberOriginal(node, resetOriginal = false) {
-    let state = nodeStates.get(node);
+    const key = nodeKey(node);
+    let state = nodeStates.get(key);
     if (!state || resetOriginal) {
       state = {
         original: node.nodeValue,
@@ -187,9 +194,20 @@
         convertedConfig: null,
         convertedText: null,
       };
-      nodeStates.set(node, state);
+      nodeStates.set(key, state);
+      if (!nodeRefs.has(key)) nodeRefs.set(key, new WeakRef(node));
     }
     return state;
+  }
+
+  function getNodeState(node) {
+    return nodeStates.get(nodeKey(node));
+  }
+
+  function deleteNodeState(node) {
+    const key = nodeKey(node);
+    nodeStates.delete(key);
+    nodeRefs.delete(key);
   }
 
   function enqueueTextNode(node, resetOriginal = false) {
@@ -219,24 +237,25 @@
 
   function clearQueue() { queue = []; queuedNodes = new WeakSet(); }
 
-  // ── Scheduling ───────────────────────────────────────────────────────────────
-
   function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
     if (!enabled) return;
     if (fullScanTimer) clearTimeout(fullScanTimer);
     fullScanTimer = setTimeout(() => {
       fullScanTimer = 0;
       if (!enabled || !document.body) return;
-      clearQueue();
+      const prevQueue = queue;
+      const prevQueued = queuedNodes;
+      queue = [];
+      queuedNodes = new WeakSet();
       const count = collectTextNodes(document.body, false);
       if (count > 0) { setStatus(`Queued ${count} text nodes`, true); scheduleProcess(0); }
-      else setStatus(`On · ${config}`);
+      else { queue = prevQueue; queuedNodes = prevQueued; setStatus(STATUS_ON_PREFIX + config); }
     }, delay);
   }
 
   function scheduleProcess(delay = PROCESS_DEBOUNCE_MS) {
     if (!enabled) return;
-    if (processTimer) clearTimeout(processTimer);
+    if (processTimer) { clearTimeout(processTimer); processTimer = 0; }
     processTimer = setTimeout(() => { processTimer = 0; void processQueue(); }, delay);
   }
 
@@ -244,12 +263,10 @@
     return new Promise(resolve => setTimeout(resolve, 0));
   }
 
-  // ── Processing ───────────────────────────────────────────────────────────────
-
   async function processQueue() {
     if (processing || !enabled) return;
     if (processTimer) { clearTimeout(processTimer); processTimer = 0; }
-    if (!queue.length) { setStatus(`On · ${config}`); return; }
+    if (!queue.length) { setStatus(STATUS_ON_PREFIX + config); return; }
     processing = true;
     const myGeneration = generation;
     const myConfig = config;
@@ -264,7 +281,7 @@
           const node = queue.shift();
           queuedNodes.delete(node);
           if (!node.isConnected || !shouldProcessTextNode(node)) continue;
-          const state = nodeStates.get(node) || rememberOriginal(node, false);
+          const state = getNodeState(node) || rememberOriginal(node, false);
           if (!state.original || !HAS_HAN.test(state.original)) continue;
           if (state.convertedConfig === myConfig && node.nodeValue === state.convertedText) continue;
           chunk.push({ node, state, version: state.version, original: state.original });
@@ -276,24 +293,32 @@
         for (const item of chunk) {
           if (!enabled || generation !== myGeneration || config !== myConfig) break;
           let converted;
-          try { converted = await converter(item.original); }
-          catch (err) {
+          try {
+            converted = await converter(item.original);
+            converterErrorCount = 0;
+          } catch (err) {
+            converterErrorCount++;
             console.error("[OpenCC-WASM userscript] Conversion failed:", err);
-            setStatus("Conversion failed", false, true);
-            return;
+            if (converterErrorCount >= MAX_CONVERTER_ERRORS) {
+              setStatus("Conversion failed", false, true);
+              return;
+            }
+            await new Promise(resolve => setTimeout(resolve, 200 * converterErrorCount));
+            continue;
           }
           results.push(converted);
         }
 
         if (!enabled || generation !== myGeneration || config !== myConfig) break;
 
-        stopObserving(true);
         writingBack = true;
+        stopObserving(false);
         try {
           for (let i = 0; i < results.length; i++) {
             if (!enabled || generation !== myGeneration || config !== myConfig) break;
             const item = chunk[i];
-            if (nodeStates.get(item.node) !== item.state || item.state.version !== item.version) continue;
+            const currentState = getNodeState(item.node);
+            if (currentState !== item.state || item.state.version !== item.version) continue;
             if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
             const convertedText = String(results[i]);
             if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
@@ -307,7 +332,7 @@
         await yieldToBrowser();
       }
 
-      if (enabled && generation === myGeneration && config === myConfig) setStatus(`On · ${myConfig}`);
+      if (enabled && generation === myGeneration && config === myConfig) setStatus(STATUS_ON_PREFIX + myConfig);
     } catch (err) {
       console.error("[OpenCC-WASM userscript] OpenCC load/process error:", err);
       setStatus("OpenCC error", false, true);
@@ -317,19 +342,17 @@
     }
   }
 
-  // ── MutationObserver ─────────────────────────────────────────────────────────
-
   function handleMutations(mutations) {
-    if (!enabled) return;
+    if (!enabled || writingBack) return;
     let enqueued = 0;
     let sawRemovedNodes = false;
     for (const mutation of mutations) {
       if (mutation.type === "characterData") {
         const node = mutation.target;
         if (shouldProcessTextNode(node)) {
-          if (!writingBack && enqueueTextNode(node, true)) enqueued++;
+          if (enqueueTextNode(node, true)) enqueued++;
         } else {
-          nodeStates.delete(node);
+          deleteNodeState(node);
         }
       } else if (mutation.type === "childList") {
         for (const added of mutation.addedNodes) enqueued += collectTextNodes(added, false);
@@ -348,17 +371,23 @@
 
   function stopObserving(processPending = false) {
     if (!observing) return;
-    if (processPending) { const pending = observer.takeRecords(); if (pending.length) handleMutations(pending); }
     observer.disconnect();
     observing = false;
+    if (processPending) { const pending = observer.takeRecords(); if (pending.length) handleMutations(pending); }
   }
 
   function schedulePrune() {
     if (pruneTimer) return;
     pruneTimer = setTimeout(() => {
       pruneTimer = 0;
-      for (const [node] of nodeStates) if (!node.isConnected) nodeStates.delete(node);
-    }, 2000);
+      for (const [key, ref] of nodeRefs) {
+        const node = ref.deref();
+        if (!node || !node.isConnected) {
+          nodeRefs.delete(key);
+          nodeStates.delete(key);
+        }
+      }
+    }, PRUNE_DELAY_MS);
   }
 
   function clearScheduledTimers() {
@@ -370,25 +399,28 @@
   function restoreOriginals() {
     clearScheduledTimers();
     stopObserving(false);
-    for (const [node, state] of nodeStates)
-      if (node.isConnected && node.nodeValue !== state.original) node.nodeValue = state.original;
+    for (const [key, ref] of nodeRefs) {
+      const node = ref.deref();
+      const state = nodeStates.get(key);
+      if (node && node.isConnected && state && node.nodeValue !== state.original) {
+        node.nodeValue = state.original;
+      }
+    }
     nodeStates.clear();
+    nodeRefs.clear();
     clearQueue();
   }
-
-  // ── Control ──────────────────────────────────────────────────────────────────
 
   function setEnabled(nextEnabled) {
     nextEnabled = Boolean(nextEnabled);
     if (nextEnabled === enabled) {
-      if (enabled) { clearScheduledTimers(); scheduleFullScan(0); }
       refreshControls();
       return;
     }
     generation++;
     clearScheduledTimers();
     if (!nextEnabled) {
-      stopObserving(true);
+      stopObserving(false);
       enabled = false;
       storeSet("enabled", enabled);
       restoreOriginals();
@@ -396,7 +428,7 @@
     } else {
       enabled = true;
       storeSet("enabled", enabled);
-      setStatus(`Starting · ${config}`, true);
+      setStatus(STATUS_ON_PREFIX + config, true);
       startObserving();
       scheduleFullScan(0);
     }
@@ -415,11 +447,8 @@
   }
 
   function findGroupForConfig(val) {
-    for (const g of CONFIG_GROUPS) if (g.configs.some(([v]) => v === val)) return g.id;
-    return CONFIG_GROUPS[0].id;
+    return CONFIG_INDEX.get(val) ?? CONFIG_GROUPS[0].id;
   }
-
-  // ── UI ───────────────────────────────────────────────────────────────────────
 
   function createPanel() {
     if (document.getElementById(PANEL_ID)) return;
@@ -439,12 +468,13 @@
 .fab:hover{transform:scale(1.08) translateY(-2px)}
 .fab:active{transform:scale(.95)}
 .fab[hidden]{display:none!important}
+.fab.busy{box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 2px var(--warning)}
 .fab-inner{font-size:18px;line-height:1;color:var(--text-1);font-weight:700}
 .fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border-radius:50%;border:1.5px solid rgba(10,10,18,.9);background:var(--text-3);transition:background .3s ease}
 .fab-dot.on{background:var(--success)}
 .fab-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}
 .fab-dot.error{background:var(--danger)}
-.panel{position:absolute;right:0;bottom:0;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 24px 64px rgba(0,0,0,.6);overflow:hidden;animation:panelIn .2s ease;transform-origin:bottom right}
+.panel{position:absolute;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 24px 64px rgba(0,0,0,.6);overflow:hidden;animation:panelIn .2s ease}
 .panel[hidden]{display:none!important}
 .panel.collapsing{animation:panelOut .18s ease forwards;pointer-events:none}
 .header{display:flex;align-items:center;gap:8px;padding:11px 14px 10px;cursor:grab;user-select:none;-webkit-user-select:none;border-bottom:1px solid var(--border)}
@@ -487,7 +517,7 @@
 .footer-version{font-size:11px;color:var(--text-3);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
 .footer-hint{font-size:10px;color:var(--text-3);opacity:.5}
 </style>
-<div class="fab" id="fab" title="OpenCC-WASM"><div class="fab-inner">文</div><div class="fab-dot" id="fabDot"></div></div>
+<div class="fab" id="fab" title="OpenCC-WASM — 拖拽移动"><div class="fab-inner">文</div><div class="fab-dot" id="fabDot"></div></div>
 <div class="panel" id="panel" hidden>
 <div class="header" id="header"><div class="header-dot" id="headerDot"></div><span class="header-label">OpenCC</span><div class="header-status" id="status"></div></div>
 <div id="body" class="body"><div class="body-left"><div class="categories" id="categories"></div></div><div class="body-right"><div class="config-list" id="configList"></div><button id="toggle" class="btn"></button></div></div>
@@ -524,14 +554,15 @@
 
     ui.toggle.addEventListener("click", () => setEnabled(!enabled));
 
-    document.addEventListener("mousedown", function onOutsideClick(e) {
+    const onOutsideClick = (e) => {
       if (collapsed) return;
       if (!ui.host.contains(e.target) && !ui.host.shadowRoot.contains(e.composedPath()[0])) {
         collapsed = true;
         storeSet("collapsed", collapsed);
         refreshControls();
       }
-    }, true);
+    };
+    document.addEventListener("mousedown", onOutsideClick, { capture: false });
 
     setupDrag();
     refreshControls();
@@ -622,8 +653,6 @@
     updateStatusDots();
   }
 
-  // ── Drag ─────────────────────────────────────────────────────────────────────
-
   function setupDrag() {
     if (!ui) return;
     let startX, startY, startLeft, startTop, moved = false;
@@ -632,59 +661,127 @@
     if (savedPos && typeof savedPos.left === "number") applyPosition(savedPos.left, savedPos.top);
 
     function applyPosition(left, top) {
-      const hostRect  = ui.host.getBoundingClientRect();
-      const panelEl   = ui.panel;
-      const panelW    = panelEl.offsetWidth || 280;
-      const hostW     = hostRect.width;
-      const hostH     = hostRect.height;
-      const minL = panelW - hostW;
-      const maxL = Math.max(minL, window.innerWidth  - hostW);
-      const maxT = Math.max(0,    window.innerHeight - hostH);
+      const hostW = 52;
+      const hostH = 52;
+      const maxL  = window.innerWidth  - hostW;
+      const maxT  = window.innerHeight - hostH;
       ui.host.style.right  = "auto";
       ui.host.style.bottom = "auto";
-      ui.host.style.left   = Math.max(minL, Math.min(left, maxL)) + "px";
-      ui.host.style.top    = Math.min(top,  maxT) + "px";
+      ui.host.style.left   = Math.max(0, Math.min(left, maxL)) + "px";
+      ui.host.style.top    = Math.max(0, Math.min(top,  maxT)) + "px";
     }
+
+    function updatePanelDirection() {
+      const rect = ui.host.getBoundingClientRect();
+      const vw   = window.innerWidth;
+      const vh   = window.innerHeight;
+
+      const panel    = ui.panel;
+      const panelW   = panel.offsetWidth  || 280;
+      const panelH   = panel.offsetHeight || 275;
+
+      const spaceRight  = vw - rect.right;
+      const spaceLeft   = rect.left;
+      const spaceBelow  = vh - rect.bottom;
+      const spaceAbove  = rect.top;
+
+      const anchorRight  = spaceRight >= panelW ? false
+                         : spaceLeft  >= panelW ? true
+                         : spaceLeft > spaceRight;
+
+      const anchorBottom = spaceAbove >= panelH ? true
+                         : spaceBelow >= panelH ? false
+                         : true;
+
+      panel.style.right  = "";
+      panel.style.left   = "";
+      panel.style.bottom = "";
+      panel.style.top    = "";
+
+      if (anchorRight)  { panel.style.right  = "0"; } else { panel.style.left   = "0"; }
+      if (anchorBottom) { panel.style.bottom = "0"; } else { panel.style.top    = "0"; }
+
+      const horiz = anchorRight  ? "right"  : "left";
+      const vert  = anchorBottom ? "bottom" : "top";
+      panel.style.transformOrigin = vert + " " + horiz;
+    }
+
+    function syncDirection() { if (!collapsed) updatePanelDirection(); }
 
     window.addEventListener("resize", () => {
       const rect = ui.host.getBoundingClientRect();
       applyPosition(rect.left, rect.top);
+      syncDirection();
     });
 
-    function startDrag(e) {
-      if (e.button !== 0) return;
+    function startDrag(clientX, clientY) {
       moved = false;
-      startX = e.clientX; startY = e.clientY;
+      startX = clientX; startY = clientY;
       const rect = ui.host.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
       applyPosition(startLeft, startTop);
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-      e.preventDefault();
     }
 
-    function onMove(e) {
-      const dx = e.clientX - startX, dy = e.clientY - startY;
+    function onMoveLogic(clientX, clientY) {
+      const dx = clientX - startX, dy = clientY - startY;
       if (!moved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
       moved = true;
       applyPosition(startLeft + dx, startTop + dy);
     }
 
-    function onUp() {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
+    function onUpLogic() {
       if (moved) {
         const rect = ui.host.getBoundingClientRect();
         storeSet("panelPos", { left: rect.left, top: rect.top });
+        syncDirection();
       } else {
         collapsed = !collapsed;
         storeSet("collapsed", collapsed);
         refreshControls();
+        if (!collapsed) requestAnimationFrame(updatePanelDirection);
       }
     }
 
-    ui.fab.addEventListener("mousedown", startDrag);
-    ui.header.addEventListener("mousedown", startDrag);
+    function onMouseMove(e) { onMoveLogic(e.clientX, e.clientY); }
+    function onMouseUp() {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      onUpLogic();
+    }
+
+    function startMouseDrag(e) {
+      if (e.button !== 0) return;
+      startDrag(e.clientX, e.clientY);
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+      e.preventDefault();
+    }
+
+    function onTouchMove(e) {
+      if (e.touches.length !== 1) return;
+      onMoveLogic(e.touches[0].clientX, e.touches[0].clientY);
+      if (moved) e.preventDefault();
+    }
+
+    function onTouchEnd() {
+      document.removeEventListener("touchmove", onTouchMove, { passive: false });
+      document.removeEventListener("touchend", onTouchEnd);
+      onUpLogic();
+    }
+
+    function startTouchDrag(e) {
+      if (e.touches.length !== 1) return;
+      startDrag(e.touches[0].clientX, e.touches[0].clientY);
+      document.addEventListener("touchmove", onTouchMove, { passive: false });
+      document.addEventListener("touchend", onTouchEnd);
+    }
+
+    requestAnimationFrame(updatePanelDirection);
+
+    ui.fab.addEventListener("mousedown", startMouseDrag);
+    ui.header.addEventListener("mousedown", startMouseDrag);
+    ui.fab.addEventListener("touchstart", startTouchDrag, { passive: true });
+    ui.header.addEventListener("touchstart", startTouchDrag, { passive: true });
   }
 
 })();
