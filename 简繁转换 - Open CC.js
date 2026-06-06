@@ -83,8 +83,6 @@
 
   const converterPromises = new Map();
 
-  // Single map: key → { state: {...}, ref: WeakRef }
-  // Replaces the previous two-map pattern (nodeStates + nodeRefs) with one unified structure.
   const nodeEntries = new Map();
 
   setInterval(() => {
@@ -233,15 +231,11 @@
       {
         acceptNode(node) {
           if (node.nodeType === Node.ELEMENT_NODE) {
-            // Reject the entire subtree for skipped elements — never descend into them.
             if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
-            return NodeFilter.FILTER_SKIP; // element itself is not a text node; keep descending
+            return NodeFilter.FILTER_SKIP;
           }
-          // TEXT_NODE: run the cheap checks (Han test + parent skip) inline.
           const text = node.nodeValue;
           if (!text || !HAS_HAN.test(text)) return NodeFilter.FILTER_SKIP;
-          // Parent was already validated by the ELEMENT branch above (not rejected),
-          // so no need for another .closest() call here.
           return NodeFilter.FILTER_ACCEPT;
         }
       }
@@ -260,8 +254,6 @@
       fullScanTimer = 0;
       if (!enabled || !document.body) return;
 
-      // Pause the observer so the DOM walk doesn't race with live mutation callbacks.
-      // Flush any pending records first so we don't lose them.
       stopObserving(true);
 
       const prevQueue = queue;
@@ -279,7 +271,6 @@
         setStatus(STATUS_ON_PREFIX + config);
       }
 
-      // Resume observation after the synchronous walk is done.
       if (enabled) startObserving();
     }, delay);
   }
@@ -580,7 +571,6 @@
 
     ui.toggle.addEventListener("click", () => setEnabled(!enabled));
 
-    // Guard: only attach once so SPA re-runs of document-idle don't stack listeners.
     if (!createPanel._outsideClickBound) {
       createPanel._outsideClickBound = true;
       const onOutsideClick = (e) => {
