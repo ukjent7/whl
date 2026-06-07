@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.7.0
+// @version      4.0.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -81,7 +81,6 @@
     processing:          false,
     writingBack:         false,
     generation:          0,
-    observing:           false,
     processTimer:        null,
     fullScanTimer:       null,
     collapsing:          false,
@@ -103,8 +102,6 @@
 
   async function main() {
     if (document.contentType && !/html/i.test(document.contentType)) return;
-    if (document.readyState === "loading")
-      await new Promise(resolve => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
     if (!document.body) return;
     createPanel();
     if (state.enabled) { startObserving(); scheduleFullScan(0); }
@@ -244,7 +241,8 @@
     state.fullScanTimer = setTimeout(() => {
       state.fullScanTimer = null;
       if (!state.enabled || !document.body) return;
-      stopObserving(true);
+      const pending = observer.takeRecords();
+      if (pending.length) handleMutations(pending);
       clearQueue();
       const count = collectTextNodes(document.body, false);
       if (count > 0) {
@@ -253,7 +251,6 @@
       } else {
         setStatus(statusOnText());
       }
-      if (state.enabled) startObserving();
     }, delay);
   }
 
@@ -317,7 +314,6 @@
         if (isStale()) break;
 
         state.writingBack = true;
-        stopObserving(false);
         try {
           for (const { item, result } of converted) {
             if (isStale()) break;
@@ -337,7 +333,6 @@
           }
         } finally {
           state.writingBack = false;
-          if (state.enabled) startObserving();
         }
         await yieldToMain();
       }
@@ -371,16 +366,8 @@
   }
 
   function startObserving() {
-    if (state.observing || !state.enabled || !document.body) return;
+    if (!state.enabled || !document.body) return;
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-    state.observing = true;
-  }
-
-  function stopObserving(processPending = false) {
-    if (!state.observing) return;
-    if (processPending) { const pending = observer.takeRecords(); if (pending.length) handleMutations(pending); }
-    observer.disconnect();
-    state.observing = false;
   }
 
   function clearScheduledTimers() {
@@ -390,7 +377,8 @@
 
   function restoreOriginals() {
     clearScheduledTimers();
-    stopObserving(false);
+    const pending = observer.takeRecords();
+    if (pending.length) handleMutations(pending);
     const walker = document.createTreeWalker(
       document.body,
       NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
@@ -405,9 +393,14 @@
       }
     );
     let node;
-    while ((node = walker.nextNode())) {
-      const ns = nodeStates.get(node);
-      if (ns && node.isConnected && node.nodeValue !== ns.original) node.nodeValue = ns.original;
+    state.writingBack = true;
+    try {
+      while ((node = walker.nextNode())) {
+        const ns = nodeStates.get(node);
+        if (ns && node.isConnected && node.nodeValue !== ns.original) node.nodeValue = ns.original;
+      }
+    } finally {
+      state.writingBack = false;
     }
     clearQueue();
   }
@@ -442,7 +435,6 @@
     state.generation++;
     clearScheduledTimers();
     if (!nextEnabled) {
-      stopObserving(false);
       state.enabled = false;
       storeSet("enabled", false);
       restoreOriginals();
@@ -469,16 +461,8 @@
     else setStatus("Off");
   }
 
-  function createPanel() {
-    if (document.getElementById(PANEL_ID)) return;
-    const host = document.createElement("div");
-    host.id = PANEL_ID;
-    host.setAttribute("data-opencc-ignore", "true");
-    document.body.appendChild(host);
-    const root = host.attachShadow({ mode: "open" });
-
-    const style = document.createElement("style");
-    style.textContent = `
+  const sharedSheet = new CSSStyleSheet();
+  sharedSheet.replaceSync(`
 :host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(10,10,18,.88);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.09);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a}
 *{box-sizing:border-box;margin:0;padding:0}
 @keyframes dotBlink{0%,100%{opacity:1}50%{opacity:.3}}
@@ -536,7 +520,17 @@
 .footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
 .footer-version{font-size:11px;color:var(--text-3);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
 .footer-hint{font-size:10px;color:var(--text-3);opacity:.5}
-`;
+`);
+
+  function createPanel() {
+    if (document.getElementById(PANEL_ID)) return;
+    const host = document.createElement("div");
+    host.id = PANEL_ID;
+    host.setAttribute("data-opencc-ignore", "true");
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: "open" });
+
+    root.adoptedStyleSheets = [sharedSheet];
 
     function el(tag, props = {}, ...children) {
       const node = document.createElement(tag);
@@ -570,7 +564,6 @@
     const panel = el("div", { className: "panel" }, header, bodyEl, footer);
     panel.hidden = true;
 
-    root.appendChild(style);
     root.appendChild(fab);
     root.appendChild(panel);
 
@@ -731,23 +724,27 @@
       syncDirection();
     }));
 
-    function startDrag(clientX, clientY) {
+    function startDrag(e) {
       moved = false;
-      startX = clientX; startY = clientY;
+      startX = e.clientX; startY = e.clientY;
       const rect = state.ui.host.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
       hostW = rect.width; hostH = rect.height;
       applyPosition(startLeft, startTop);
+      e.currentTarget.setPointerCapture(e.pointerId);
     }
 
-    function onMoveLogic(clientX, clientY) {
-      const dx = clientX - startX, dy = clientY - startY;
+    function onPointerMove(e) {
+      if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+      const dx = e.clientX - startX, dy = e.clientY - startY;
       if (!moved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
       moved = true;
       applyPosition(startLeft + dx, startTop + dy);
     }
 
-    function onUpLogic() {
+    function onPointerUp(e) {
+      if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+      e.currentTarget.releasePointerCapture(e.pointerId);
       if (moved) {
         const rect = state.ui.host.getBoundingClientRect();
         storeSet("panelPos", { left: rect.left, top: rect.top });
@@ -760,19 +757,10 @@
       }
     }
 
-    function onMouseMove(e) { onMoveLogic(e.clientX, e.clientY); }
-    function onMouseUp() {
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-      onUpLogic();
-    }
-
-    function startMouseDrag(e) {
-      if (e.button !== 0) return;
-      startDrag(e.clientX, e.clientY);
-      document.addEventListener("mousemove", onMouseMove);
-      document.addEventListener("mouseup", onMouseUp);
-      e.preventDefault();
+    function attachDragListeners(el) {
+      el.addEventListener("pointerdown", startDrag);
+      el.addEventListener("pointermove", onPointerMove);
+      el.addEventListener("pointerup",   onPointerUp);
     }
 
     const initRect = state.ui.host.getBoundingClientRect();
@@ -781,8 +769,8 @@
 
     requestAnimationFrame(updatePanelDirection);
 
-    state.ui.fab.addEventListener("mousedown", startMouseDrag);
-    state.ui.header.addEventListener("mousedown", startMouseDrag);
+    attachDragListeners(state.ui.fab);
+    attachDragListeners(state.ui.header);
   }
 
 })();
