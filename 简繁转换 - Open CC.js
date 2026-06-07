@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      4.0.0
+// @version      3.7.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -14,18 +14,16 @@
 (function () {
   "use strict";
 
-  const OPENCC_VERSION   = "0.8.2";
-  const OPENCC_ESM_URL   = `https://cdn.jsdelivr.net/npm/opencc-wasm@${OPENCC_VERSION}/dist/esm/index.js`;
-  const DEFAULT_CONFIG   = "s2twp";
-  const DEFAULT_ENABLED  = true;
-  const CHUNK_SIZE              = 80;
-  const PROCESS_DEBOUNCE_MS     = 80;
-  const FULL_SCAN_DEBOUNCE_MS   = 60;
-  const MAX_CONVERTER_ERRORS    = 5;
-  const MAX_CONVERTER_RETRIES   = 3;
-  const PANEL_ID         = "opencc-wasm-tm-panel-host";
-  const STORE_PREFIX     = "openccWasmUserscript.";
-  const WARMUP_TEXT      = "伺服器发现資訊只鸡";
+  const OPENCC_ESM_URL = "https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js";
+  const DEFAULT_CONFIG = "s2twp";
+  const DEFAULT_ENABLED = true;
+  const CHUNK_SIZE = 80;
+  const PROCESS_DEBOUNCE_MS = 80;
+  const FULL_SCAN_DEBOUNCE_MS = 60;
+  const MAX_CONVERTER_ERRORS = 5;
+  const PANEL_ID = "opencc-wasm-tm-panel-host";
+  const STORE_PREFIX = "openccWasmUserscript.";
+  const WARMUP_TEXT = "伺服器发现資訊只鸡";
   const STATUS_ON_PREFIX = "On · ";
 
   const CONFIG_GROUPS = [
@@ -61,7 +59,8 @@
     ]},
   ];
 
-  const CONFIG_MAP = new Map(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => [v, g.id])));
+  const CONFIG_VALUES = new Set(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => v)));
+  const CONFIG_INDEX  = new Map(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => [v, g.id])));
 
   const SKIP_SELECTOR = [
     `#${PANEL_ID}`, "[data-opencc-ignore]", "script", "style", "noscript", "template",
@@ -70,29 +69,28 @@
 
   const HAS_HAN = /\p{Script=Han}/u;
 
-  const yieldToMain = () => scheduler.yield();
-
   const state = {
     config:              readConfig(),
-    enabled:             readBool("enabled", DEFAULT_ENABLED),
-    collapsed:           readBool("collapsed", false),
+    enabled:             storeGet("enabled", DEFAULT_ENABLED),
+    collapsed:           storeGet("collapsed", false),
     queue:               [],
     queuedNodes:         new WeakSet(),
     processing:          false,
     writingBack:         false,
     generation:          0,
-    processTimer:        null,
-    fullScanTimer:       null,
+    observing:           false,
+    processTimer:        0,
+    fullScanTimer:       0,
     collapsing:          false,
     converterErrorCount: 0,
     status:              { text: "", busy: false, error: false },
     ui:                  null,
   };
 
-  state.status.text = state.enabled ? statusOnText() : "Off";
+  state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
 
   const nodeStates = new WeakMap();
-  const converterCache = new Map();
+  const converterPromises = new Map();
   const observer = new MutationObserver(handleMutations);
 
   main().catch(err => {
@@ -102,22 +100,17 @@
 
   async function main() {
     if (document.contentType && !/html/i.test(document.contentType)) return;
+    if (document.readyState === "loading")
+      await new Promise(resolve => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
     if (!document.body) return;
     createPanel();
     if (state.enabled) { startObserving(); scheduleFullScan(0); }
     else setStatus("Off");
   }
 
-  function statusOnText() { return STATUS_ON_PREFIX + state.config; }
-
   function readConfig() {
     const saved = storeGet("config", DEFAULT_CONFIG);
-    return CONFIG_MAP.has(saved) ? saved : DEFAULT_CONFIG;
-  }
-
-  function readBool(key, fallback) {
-    const raw = storeGet(key, fallback);
-    return typeof raw === "boolean" ? raw : fallback;
+    return CONFIG_VALUES.has(saved) ? saved : DEFAULT_CONFIG;
   }
 
   function storeGet(key, fallback) {
@@ -138,29 +131,21 @@
     }
   }
 
-  function getConverter(configName) {
-    if (converterCache.has(configName)) return converterCache.get(configName);
-    let retries = 0;
-    async function attempt() {
+  async function getConverter(configName) {
+    if (converterPromises.has(configName)) return converterPromises.get(configName);
+    const promise = (async () => {
       try {
         const mod = await import(OPENCC_ESM_URL);
         const OpenCC = mod.default || mod;
         const converter = OpenCC.Converter({ config: configName });
-        if (typeof converter !== "function") throw new TypeError("Converter is not callable");
         await converter(WARMUP_TEXT);
         return converter;
       } catch (err) {
-        converterCache.delete(configName);
-        retries++;
-        if (retries >= MAX_CONVERTER_RETRIES) throw err;
-        await new Promise(r => setTimeout(r, 500 * retries));
-        const next = attempt();
-        converterCache.set(configName, next);
-        return next;
+        converterPromises.delete(configName);
+        throw err;
       }
-    }
-    const promise = attempt();
-    converterCache.set(configName, promise);
+    })();
+    converterPromises.set(configName, promise);
     return promise;
   }
 
@@ -237,47 +222,42 @@
 
   function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
     if (!state.enabled) return;
-    if (state.fullScanTimer !== null) clearTimeout(state.fullScanTimer);
+    if (state.fullScanTimer) clearTimeout(state.fullScanTimer);
     state.fullScanTimer = setTimeout(() => {
-      state.fullScanTimer = null;
+      state.fullScanTimer = 0;
       if (!state.enabled || !document.body) return;
-      const pending = observer.takeRecords();
-      if (pending.length) handleMutations(pending);
+      stopObserving(true);
       clearQueue();
       const count = collectTextNodes(document.body, false);
       if (count > 0) {
         setStatus(`Queued ${count} text nodes`, true);
         scheduleProcess(0);
       } else {
-        setStatus(statusOnText());
+        setStatus(STATUS_ON_PREFIX + state.config);
       }
+      if (state.enabled) startObserving();
     }, delay);
   }
 
   function scheduleProcess(delay = PROCESS_DEBOUNCE_MS) {
     if (!state.enabled) return;
-    if (state.processTimer !== null) { clearTimeout(state.processTimer); state.processTimer = null; }
-    state.processTimer = setTimeout(() => { state.processTimer = null; void processQueue(); }, delay);
+    if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
+    state.processTimer = setTimeout(() => { state.processTimer = 0; void processQueue(); }, delay);
   }
 
   async function processQueue() {
     if (state.processing || !state.enabled) return;
-    if (state.processTimer !== null) { clearTimeout(state.processTimer); state.processTimer = null; }
-    if (!state.queue.length) { setStatus(statusOnText()); return; }
-
+    if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
+    if (!state.queue.length) { setStatus(STATUS_ON_PREFIX + state.config); return; }
     state.processing = true;
     const myGeneration = state.generation;
     const myConfig = state.config;
-
-    const isStale = () =>
-      !state.enabled || state.generation !== myGeneration || state.config !== myConfig;
-
     try {
       setStatus(`Loading ${myConfig}…`, true);
       const converter = await getConverter(myConfig);
-      if (isStale()) return;
+      if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) return;
 
-      while (!isStale() && state.queue.length) {
+      while (state.enabled && state.generation === myGeneration && state.config === myConfig && state.queue.length) {
         const chunk = [];
         while (state.queue.length && chunk.length < CHUNK_SIZE) {
           const node = state.queue.shift();
@@ -288,12 +268,12 @@
           if (ns.convertedConfig === myConfig && node.nodeValue === ns.convertedText) continue;
           chunk.push({ node, state: ns, version: ns.version, original: ns.original });
         }
-        if (!chunk.length) { await yieldToMain(); continue; }
+        if (!chunk.length) { await scheduler.yield(); continue; }
 
         setStatus(`Converting… ${state.queue.length} left`, true);
         const converted = [];
         for (const item of chunk) {
-          if (isStale()) break;
+          if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
           let result;
           try {
             result = await converter(item.original);
@@ -311,20 +291,15 @@
           converted.push({ item, result });
         }
 
-        if (isStale()) break;
+        if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
 
         state.writingBack = true;
+        stopObserving(false);
         try {
           for (const { item, result } of converted) {
-            if (isStale()) break;
+            if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
             const currentState = nodeStates.get(item.node);
-            if (currentState !== item.state || item.state.version !== item.version) {
-              if (currentState) {
-                currentState.convertedConfig = null;
-                currentState.convertedText = null;
-              }
-              continue;
-            }
+            if (currentState !== item.state || item.state.version !== item.version) continue;
             if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
             const convertedText = String(result);
             if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
@@ -333,11 +308,13 @@
           }
         } finally {
           state.writingBack = false;
+          if (state.enabled) startObserving();
         }
-        await yieldToMain();
+        await scheduler.yield();
       }
 
-      if (!isStale()) setStatus(statusOnText());
+      if (state.enabled && state.generation === myGeneration && state.config === myConfig)
+        setStatus(STATUS_ON_PREFIX + myConfig);
     } catch (err) {
       console.error("[OpenCC-WASM userscript] OpenCC load/process error:", err);
       setStatus("OpenCC error", false, true);
@@ -366,67 +343,33 @@
   }
 
   function startObserving() {
-    if (!state.enabled || !document.body) return;
+    if (state.observing || !state.enabled || !document.body) return;
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    state.observing = true;
+  }
+
+  function stopObserving(processPending = false) {
+    if (!state.observing) return;
+    if (processPending) { const pending = observer.takeRecords(); if (pending.length) handleMutations(pending); }
+    observer.disconnect();
+    state.observing = false;
   }
 
   function clearScheduledTimers() {
-    if (state.processTimer  !== null) { clearTimeout(state.processTimer);  state.processTimer  = null; }
-    if (state.fullScanTimer !== null) { clearTimeout(state.fullScanTimer); state.fullScanTimer = null; }
+    if (state.processTimer)  { clearTimeout(state.processTimer);  state.processTimer  = 0; }
+    if (state.fullScanTimer) { clearTimeout(state.fullScanTimer); state.fullScanTimer = 0; }
   }
 
   function restoreOriginals() {
     clearScheduledTimers();
-    const pending = observer.takeRecords();
-    if (pending.length) handleMutations(pending);
-    const walker = document.createTreeWalker(
-      document.body,
-      NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
-      {
-        acceptNode(node) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
-            return NodeFilter.FILTER_SKIP;
-          }
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      }
-    );
+    stopObserving(false);
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let node;
-    state.writingBack = true;
-    try {
-      while ((node = walker.nextNode())) {
-        const ns = nodeStates.get(node);
-        if (ns && node.isConnected && node.nodeValue !== ns.original) node.nodeValue = ns.original;
-      }
-    } finally {
-      state.writingBack = false;
+    while ((node = walker.nextNode())) {
+      const ns = nodeStates.get(node);
+      if (ns && node.isConnected && node.nodeValue !== ns.original) node.nodeValue = ns.original;
     }
     clearQueue();
-  }
-
-  function setPanelVisible(visible) {
-    if (!state.ui) return;
-    const { panel, fab } = state.ui;
-    if (visible) {
-      fab.hidden = true;
-      panel.hidden = false;
-      panel.classList.remove("collapsing");
-      state.collapsing = false;
-    } else if (!panel.hidden && !state.collapsing) {
-      state.collapsing = true;
-      panel.classList.add("collapsing");
-      panel.addEventListener("animationend", function onEnd() {
-        panel.removeEventListener("animationend", onEnd);
-        panel.classList.remove("collapsing");
-        panel.hidden = true;
-        fab.hidden = false;
-        state.collapsing = false;
-      }, { once: true });
-    } else if (!state.collapsing) {
-      panel.hidden = true;
-      fab.hidden = false;
-    }
   }
 
   function setEnabled(nextEnabled) {
@@ -435,6 +378,7 @@
     state.generation++;
     clearScheduledTimers();
     if (!nextEnabled) {
+      stopObserving(false);
       state.enabled = false;
       storeSet("enabled", false);
       restoreOriginals();
@@ -442,7 +386,7 @@
     } else {
       state.enabled = true;
       storeSet("enabled", true);
-      setStatus(statusOnText(), true);
+      setStatus(STATUS_ON_PREFIX + state.config, true);
       startObserving();
       scheduleFullScan(0);
     }
@@ -450,7 +394,7 @@
   }
 
   function setConfig(nextConfig) {
-    if (!CONFIG_MAP.has(nextConfig)) return;
+    if (!CONFIG_VALUES.has(nextConfig)) return;
     if (nextConfig === state.config) { refreshControls(); return; }
     state.config = nextConfig;
     storeSet("config", state.config);
@@ -461,8 +405,16 @@
     else setStatus("Off");
   }
 
-  const sharedSheet = new CSSStyleSheet();
-  sharedSheet.replaceSync(`
+  function createPanel() {
+    if (document.getElementById(PANEL_ID)) return;
+    const host = document.createElement("div");
+    host.id = PANEL_ID;
+    host.setAttribute("data-opencc-ignore", "true");
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: "open" });
+
+    const style = document.createElement("style");
+    style.textContent = `
 :host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(10,10,18,.88);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.09);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a}
 *{box-sizing:border-box;margin:0;padding:0}
 @keyframes dotBlink{0%,100%{opacity:1}50%{opacity:.3}}
@@ -501,8 +453,6 @@
 .config-list{flex:1;overflow-y:scroll;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
 @keyframes listFade{from{opacity:0}to{opacity:1}}
 .config-list.switching{animation:listFade .15s ease}
-.config-list::-webkit-scrollbar{width:3px}
-.config-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 .config-item{display:flex;align-items:flex-start;gap:7px;padding:5px 8px;border-radius:7px;cursor:pointer;transition:background .12s;border:1px solid transparent}
 .config-item:hover{background:var(--bg-card);border-color:var(--border)}
 .config-item.selected{background:rgba(124,106,247,.1);border-color:rgba(124,106,247,.25)}
@@ -520,22 +470,17 @@
 .footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
 .footer-version{font-size:11px;color:var(--text-3);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
 .footer-hint{font-size:10px;color:var(--text-3);opacity:.5}
-`);
+`;
 
-  function createPanel() {
-    if (document.getElementById(PANEL_ID)) return;
-    const host = document.createElement("div");
-    host.id = PANEL_ID;
-    host.setAttribute("data-opencc-ignore", "true");
-    document.body.appendChild(host);
-    const root = host.attachShadow({ mode: "open" });
-
-    root.adoptedStyleSheets = [sharedSheet];
-
-    function el(tag, props = {}, ...children) {
+    function el(tag, attrs = {}, ...children) {
       const node = document.createElement(tag);
-      for (const [k, v] of Object.entries(props)) node[k] = v;
-      if (children.length) node.append(...children);
+      for (const [k, v] of Object.entries(attrs)) {
+        if (k === "className") node.className = v;
+        else node.setAttribute(k, v);
+      }
+      for (const child of children) {
+        node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+      }
       return node;
     }
 
@@ -557,13 +502,14 @@
     );
 
     const footer = el("div", { className: "footer" },
-      el("span", { className: "footer-version" }, `opencc-wasm ${OPENCC_VERSION}`),
+      el("span", { className: "footer-version" }, "opencc-wasm 0.8.2"),
       el("span", { className: "footer-hint" }, "拖拽移动"),
     );
 
     const panel = el("div", { className: "panel" }, header, bodyEl, footer);
     panel.hidden = true;
 
+    root.appendChild(style);
     root.appendChild(fab);
     root.appendChild(panel);
 
@@ -571,7 +517,7 @@
       host, root, status: statusEl, configList,
       categories: categoriesEl, toggle, fab, panel,
       fabDot, headerDot, header,
-      activeCategory: CONFIG_MAP.get(state.config),
+      activeCategory: CONFIG_INDEX.get(state.config),
     };
 
     for (const group of CONFIG_GROUPS) {
@@ -593,14 +539,14 @@
 
     toggle.addEventListener("click", () => setEnabled(!state.enabled));
 
-    document.addEventListener("pointerdown", (e) => {
+    document.addEventListener("mousedown", (e) => {
       if (state.collapsed || !state.ui) return;
-      if (!root.contains(e.composedPath()[0])) {
+      if (!state.ui.host.shadowRoot.contains(e.composedPath()[0])) {
         state.collapsed = true;
         storeSet("collapsed", state.collapsed);
         refreshControls();
       }
-    }, { capture: true });
+    }, { capture: false });
 
     setupDrag();
     refreshControls();
@@ -612,7 +558,7 @@
     const list = state.ui.configList;
     list.innerHTML = "";
     list.classList.remove("switching");
-    list.offsetWidth;
+    void list.offsetWidth;
     list.classList.add("switching");
     for (const [value, label] of group.configs) {
       const item = document.createElement("div");
@@ -642,11 +588,33 @@
 
   function refreshControls() {
     if (!state.ui) return;
-    const catId = CONFIG_MAP.get(state.config);
+    const catId = CONFIG_INDEX.get(state.config);
     if (state.ui.activeCategory !== catId) { state.ui.activeCategory = catId; populateConfigList(); }
     else updateConfigListSelection();
     updateCategoryTabs();
-    setPanelVisible(!state.collapsed);
+
+    if (state.collapsed) {
+      if (!state.ui.panel.hidden && !state.collapsing) {
+        state.collapsing = true;
+        state.ui.panel.classList.add("collapsing");
+        state.ui.panel.addEventListener("animationend", function onEnd() {
+          state.ui.panel.removeEventListener("animationend", onEnd);
+          state.ui.panel.classList.remove("collapsing");
+          state.ui.panel.hidden = true;
+          state.ui.fab.hidden = false;
+          state.collapsing = false;
+        }, { once: true });
+      } else if (!state.collapsing) {
+        state.ui.panel.hidden = true;
+        state.ui.fab.hidden = false;
+      }
+    } else {
+      state.ui.fab.hidden = true;
+      state.ui.panel.hidden = false;
+      state.ui.panel.classList.remove("collapsing");
+      state.collapsing = false;
+    }
+
     state.ui.toggle.textContent = state.enabled ? "关" : "开";
     state.ui.toggle.className = "btn " + (state.enabled ? "btn-danger" : "btn-primary");
     updateStatusDots();
@@ -672,12 +640,13 @@
 
   function setupDrag() {
     if (!state.ui) return;
-    let startX, startY, startLeft, startTop, hostW, hostH, moved = false;
+    let startX, startY, startLeft, startTop, moved = false;
     const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
     if (savedPos && typeof savedPos.left === "number") applyPosition(savedPos.left, savedPos.top);
 
     function applyPosition(left, top) {
+      const { offsetWidth: hostW, offsetHeight: hostH } = state.ui.host;
       const maxL = window.innerWidth  - hostW;
       const maxT = window.innerHeight - hostH;
       state.ui.host.style.right  = "auto";
@@ -718,33 +687,26 @@
 
     window.addEventListener("resize", () => requestAnimationFrame(() => {
       const rect = state.ui.host.getBoundingClientRect();
-      hostW = rect.width;
-      hostH = rect.height;
       applyPosition(rect.left, rect.top);
       syncDirection();
     }));
 
-    function startDrag(e) {
+    function startDrag(clientX, clientY) {
       moved = false;
-      startX = e.clientX; startY = e.clientY;
+      startX = clientX; startY = clientY;
       const rect = state.ui.host.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
-      hostW = rect.width; hostH = rect.height;
       applyPosition(startLeft, startTop);
-      e.currentTarget.setPointerCapture(e.pointerId);
     }
 
-    function onPointerMove(e) {
-      if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
-      const dx = e.clientX - startX, dy = e.clientY - startY;
+    function onMoveLogic(clientX, clientY) {
+      const dx = clientX - startX, dy = clientY - startY;
       if (!moved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
       moved = true;
       applyPosition(startLeft + dx, startTop + dy);
     }
 
-    function onPointerUp(e) {
-      if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
-      e.currentTarget.releasePointerCapture(e.pointerId);
+    function onUpLogic() {
       if (moved) {
         const rect = state.ui.host.getBoundingClientRect();
         storeSet("panelPos", { left: rect.left, top: rect.top });
@@ -757,20 +719,25 @@
       }
     }
 
-    function attachDragListeners(el) {
-      el.addEventListener("pointerdown", startDrag);
-      el.addEventListener("pointermove", onPointerMove);
-      el.addEventListener("pointerup",   onPointerUp);
+    function onMouseMove(e) { onMoveLogic(e.clientX, e.clientY); }
+    function onMouseUp() {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      onUpLogic();
     }
 
-    const initRect = state.ui.host.getBoundingClientRect();
-    hostW = initRect.width || 52;
-    hostH = initRect.height || 52;
+    function startMouseDrag(e) {
+      if (e.button !== 0) return;
+      startDrag(e.clientX, e.clientY);
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+      e.preventDefault();
+    }
 
     requestAnimationFrame(updatePanelDirection);
 
-    attachDragListeners(state.ui.fab);
-    attachDragListeners(state.ui.header);
+    state.ui.fab.addEventListener("mousedown", startMouseDrag);
+    state.ui.header.addEventListener("mousedown", startMouseDrag);
   }
 
 })();
