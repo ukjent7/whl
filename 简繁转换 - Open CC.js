@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.5.0
+// @version      3.6.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -20,7 +20,6 @@
   const CHUNK_SIZE = 80;
   const PROCESS_DEBOUNCE_MS = 80;
   const FULL_SCAN_DEBOUNCE_MS = 60;
-  const PRUNE_DELAY_MS = 2000;
   const MAX_CONVERTER_ERRORS = 5;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
   const STORE_PREFIX = "openccWasmUserscript.";
@@ -68,33 +67,30 @@
     "textarea", "input", "select", "option", "code", "pre", "kbd", "samp", "svg", "math", "canvas",
   ].join(",");
 
-  const HAS_HAN = new RegExp("\\p{Script=Han}", "u");
+  const HAS_HAN = /\p{Script=Han}/u;
 
   const state = {
-    config:             readConfig(),
-    enabled:            Boolean(storeGet("enabled", DEFAULT_ENABLED)),
-    collapsed:          Boolean(storeGet("collapsed", false)),
-    queue:              [],
-    queuedNodes:        new WeakSet(),
-    processing:         false,
-    writingBack:        false,
-    generation:         0,
-    observing:          false,
-    processTimer:       0,
-    fullScanTimer:      0,
-    pruneTimer:         0,
-    collapsing:         false,
-    converterErrorCount:0,
-    status:             { text: "", busy: false, error: false },
-    ui:                 null,
+    config:              readConfig(),
+    enabled:             storeGet("enabled", DEFAULT_ENABLED),
+    collapsed:           storeGet("collapsed", false),
+    queue:               [],
+    queuedNodes:         new WeakSet(),
+    processing:          false,
+    writingBack:         false,
+    generation:          0,
+    observing:           false,
+    processTimer:        0,
+    fullScanTimer:       0,
+    collapsing:          false,
+    converterErrorCount: 0,
+    status:              { text: "", busy: false, error: false },
+    ui:                  null,
   };
 
   state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
 
   const nodeStates = new WeakMap();
-
   const converterPromises = new Map();
-
   const observer = new MutationObserver(handleMutations);
 
   main().catch(err => {
@@ -104,17 +100,12 @@
 
   async function main() {
     if (document.contentType && !/html/i.test(document.contentType)) return;
-    await domReady();
+    if (document.readyState === "loading")
+      await new Promise(resolve => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
     if (!document.body) return;
     createPanel();
     if (state.enabled) { startObserving(); scheduleFullScan(0); }
     else setStatus("Off");
-  }
-
-  function domReady() {
-    if (document.readyState === "loading")
-      return new Promise(resolve => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
-    return Promise.resolve();
   }
 
   function readConfig() {
@@ -169,8 +160,7 @@
     const text = node.nodeValue;
     if (!text || !HAS_HAN.test(text)) return false;
     const parent = node.parentElement;
-    if (!parent || shouldSkipElement(parent)) return false;
-    return true;
+    return Boolean(parent && !shouldSkipElement(parent));
   }
 
   function rememberOriginal(node, resetOriginal = false) {
@@ -185,14 +175,6 @@
       entry.convertedText = null;
     }
     return entry;
-  }
-
-  function getNodeState(node) {
-    return nodeStates.get(node);
-  }
-
-  function deleteNodeState(node) {
-    nodeStates.delete(node);
   }
 
   function enqueueTextNode(node, resetOriginal = false) {
@@ -244,20 +226,15 @@
     state.fullScanTimer = setTimeout(() => {
       state.fullScanTimer = 0;
       if (!state.enabled || !document.body) return;
-
       stopObserving(true);
-
-      state.queue = [];
-      state.queuedNodes = new WeakSet();
+      clearQueue();
       const count = collectTextNodes(document.body, false);
-
       if (count > 0) {
         setStatus(`Queued ${count} text nodes`, true);
         scheduleProcess(0);
       } else {
         setStatus(STATUS_ON_PREFIX + state.config);
       }
-
       if (state.enabled) startObserving();
     }, delay);
   }
@@ -266,10 +243,6 @@
     if (!state.enabled) return;
     if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
     state.processTimer = setTimeout(() => { state.processTimer = 0; void processQueue(); }, delay);
-  }
-
-  function yieldToBrowser() {
-    return scheduler.yield();
   }
 
   async function processQueue() {
@@ -290,12 +263,12 @@
           const node = state.queue.shift();
           state.queuedNodes.delete(node);
           if (!node.isConnected || !shouldProcessTextNode(node)) continue;
-          const ns = getNodeState(node) || rememberOriginal(node, false);
+          const ns = nodeStates.get(node) || rememberOriginal(node, false);
           if (!ns.original || !HAS_HAN.test(ns.original)) continue;
           if (ns.convertedConfig === myConfig && node.nodeValue === ns.convertedText) continue;
           chunk.push({ node, state: ns, version: ns.version, original: ns.original });
         }
-        if (!chunk.length) { await yieldToBrowser(); continue; }
+        if (!chunk.length) { await scheduler.yield(); continue; }
 
         setStatus(`Converting… ${state.queue.length} left`, true);
         const converted = [];
@@ -325,7 +298,7 @@
         try {
           for (const { item, result } of converted) {
             if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
-            const currentState = getNodeState(item.node);
+            const currentState = nodeStates.get(item.node);
             if (currentState !== item.state || item.state.version !== item.version) continue;
             if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
             const convertedText = String(result);
@@ -337,7 +310,7 @@
           state.writingBack = false;
           if (state.enabled) startObserving();
         }
-        await yieldToBrowser();
+        await scheduler.yield();
       }
 
       if (state.enabled && state.generation === myGeneration && state.config === myConfig)
@@ -354,22 +327,19 @@
   function handleMutations(mutations) {
     if (!state.enabled || state.writingBack) return;
     let enqueued = 0;
-    let sawRemovedNodes = false;
     for (const mutation of mutations) {
       if (mutation.type === "characterData") {
         const node = mutation.target;
         if (shouldProcessTextNode(node)) {
           if (enqueueTextNode(node, true)) enqueued++;
         } else {
-          deleteNodeState(node);
+          nodeStates.delete(node);
         }
       } else if (mutation.type === "childList") {
         for (const added of mutation.addedNodes) enqueued += collectTextNodes(added, false);
-        if (mutation.removedNodes.length) sawRemovedNodes = true;
       }
     }
     if (enqueued > 0) scheduleProcess(PROCESS_DEBOUNCE_MS);
-    if (sawRemovedNodes) schedulePrune();
   }
 
   function startObserving() {
@@ -385,17 +355,9 @@
     state.observing = false;
   }
 
-  function schedulePrune() {
-    if (state.pruneTimer) return;
-    state.pruneTimer = setTimeout(() => {
-      state.pruneTimer = 0;
-    }, PRUNE_DELAY_MS);
-  }
-
   function clearScheduledTimers() {
     if (state.processTimer)  { clearTimeout(state.processTimer);  state.processTimer  = 0; }
     if (state.fullScanTimer) { clearTimeout(state.fullScanTimer); state.fullScanTimer = 0; }
-    if (state.pruneTimer)    { clearTimeout(state.pruneTimer);    state.pruneTimer    = 0; }
   }
 
   function restoreOriginals() {
@@ -441,10 +403,6 @@
     refreshControls();
     if (state.enabled) { setStatus(`Switching to ${state.config}…`, true); scheduleFullScan(0); }
     else setStatus("Off");
-  }
-
-  function findGroupForConfig(val) {
-    return CONFIG_INDEX.get(val);
   }
 
   function createPanel() {
@@ -520,8 +478,6 @@
       const node = document.createElement(tag);
       for (const [k, v] of Object.entries(attrs)) {
         if (k === "className") node.className = v;
-        else if (k === "id") node.id = v;
-        else if (k === "hidden") node.hidden = v;
         else node.setAttribute(k, v);
       }
       for (const child of children) {
@@ -563,7 +519,7 @@
       host, root, status: statusEl, configList,
       categories: categoriesEl, toggle, fab, panel,
       fabDot, headerDot, header,
-      activeCategory: findGroupForConfig(state.config),
+      activeCategory: CONFIG_INDEX.get(state.config),
     };
 
     for (const group of CONFIG_GROUPS) {
@@ -586,9 +542,8 @@
     toggle.addEventListener("click", () => setEnabled(!state.enabled));
 
     document.addEventListener("mousedown", (e) => {
-      if (state.collapsed) return;
-      if (!state.ui || !state.ui.host) return;
-      if (!state.ui.host.contains(e.target) && !state.ui.host.shadowRoot.contains(e.composedPath()[0])) {
+      if (state.collapsed || !state.ui) return;
+      if (!state.ui.host.shadowRoot.contains(e.composedPath()[0])) {
         state.collapsed = true;
         storeSet("collapsed", state.collapsed);
         refreshControls();
@@ -601,11 +556,12 @@
   }
 
   function populateConfigList() {
-    const group = CONFIG_GROUPS.find(g => g.id === state.ui.activeCategory) || CONFIG_GROUPS[0];
+    const group = CONFIG_GROUPS.find(g => g.id === state.ui.activeCategory) ?? CONFIG_GROUPS[0];
     const list = state.ui.configList;
     list.innerHTML = "";
+    list.classList.remove("switching");
+    void list.offsetWidth;
     list.classList.add("switching");
-    list.getAnimations().forEach(a => { a.cancel(); a.play(); });
     for (const [value, label] of group.configs) {
       const item = document.createElement("div");
       item.className = "config-item" + (value === state.config ? " selected" : "");
@@ -634,7 +590,7 @@
 
   function refreshControls() {
     if (!state.ui) return;
-    const catId = findGroupForConfig(state.config);
+    const catId = CONFIG_INDEX.get(state.config);
     if (state.ui.activeCategory !== catId) { state.ui.activeCategory = catId; populateConfigList(); }
     else updateConfigListSelection();
     updateCategoryTabs();
@@ -677,7 +633,7 @@
 
   function setStatus(text, busy = false, error = false) {
     state.status = { text, busy, error };
-    if (!state.ui || !state.ui.status) return;
+    if (!state.ui?.status) return;
     state.ui.status.textContent = text;
     state.ui.status.classList.toggle("busy", busy);
     state.ui.status.classList.toggle("error", error);
@@ -722,17 +678,11 @@
                          : spaceBelow >= panelH ? false
                          : true;
 
-      panel.style.right  = "";
-      panel.style.left   = "";
-      panel.style.bottom = "";
-      panel.style.top    = "";
-
-      if (anchorRight)  { panel.style.right  = "0"; } else { panel.style.left   = "0"; }
-      if (anchorBottom) { panel.style.bottom = "0"; } else { panel.style.top    = "0"; }
-
-      const horiz = anchorRight  ? "right"  : "left";
-      const vert  = anchorBottom ? "bottom" : "top";
-      panel.style.transformOrigin = vert + " " + horiz;
+      panel.style.right  = anchorRight  ? "0" : "";
+      panel.style.left   = anchorRight  ? "" : "0";
+      panel.style.bottom = anchorBottom ? "0" : "";
+      panel.style.top    = anchorBottom ? "" : "0";
+      panel.style.transformOrigin = `${anchorBottom ? "bottom" : "top"} ${anchorRight ? "right" : "left"}`;
     }
 
     function syncDirection() { if (!state.collapsed) updatePanelDirection(); }
@@ -786,31 +736,10 @@
       e.preventDefault();
     }
 
-    function onTouchMove(e) {
-      if (e.touches.length !== 1) return;
-      onMoveLogic(e.touches[0].clientX, e.touches[0].clientY);
-      if (moved) e.preventDefault();
-    }
-
-    function onTouchEnd() {
-      document.removeEventListener("touchmove", onTouchMove, { passive: false });
-      document.removeEventListener("touchend", onTouchEnd);
-      onUpLogic();
-    }
-
-    function startTouchDrag(e) {
-      if (e.touches.length !== 1) return;
-      startDrag(e.touches[0].clientX, e.touches[0].clientY);
-      document.addEventListener("touchmove", onTouchMove, { passive: false });
-      document.addEventListener("touchend", onTouchEnd);
-    }
-
     requestAnimationFrame(updatePanelDirection);
 
     state.ui.fab.addEventListener("mousedown", startMouseDrag);
     state.ui.header.addEventListener("mousedown", startMouseDrag);
-    state.ui.fab.addEventListener("touchstart", startTouchDrag, { passive: true });
-    state.ui.header.addEventListener("touchstart", startTouchDrag, { passive: true });
   }
 
 })();
