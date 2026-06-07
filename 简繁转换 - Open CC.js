@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.3.0
+// @version      3.4.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -107,6 +107,7 @@
   let ui = null;
   let collapsing = false;
   let converterErrorCount = 0;
+  let outsideClickBound = false;
   const MAX_CONVERTER_ERRORS = 5;
 
   const observer = new MutationObserver(handleMutations);
@@ -137,24 +138,38 @@
   }
 
   function storeGet(key, fallback) {
-    try { const raw = localStorage.getItem(STORE_PREFIX + key); return raw == null ? fallback : JSON.parse(raw); } catch (_) { return fallback; }
+    try {
+      const raw = localStorage.getItem(STORE_PREFIX + key);
+      return raw == null ? fallback : JSON.parse(raw);
+    } catch (err) {
+      console.warn("[OpenCC-WASM userscript] storeGet failed:", err);
+      return fallback;
+    }
   }
 
   function storeSet(key, value) {
-    try { localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value)); } catch (_) {}
+    try {
+      localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value));
+    } catch (err) {
+      console.warn("[OpenCC-WASM userscript] storeSet failed:", err);
+    }
   }
 
   async function getConverter(configName) {
     if (converterPromises.has(configName)) return converterPromises.get(configName);
     const promise = (async () => {
-      const mod = await import(OPENCC_ESM_URL);
-      const OpenCC = mod.default || mod;
-      const converter = OpenCC.Converter({ config: configName });
-      await converter(WARMUP_TEXT);
-      return converter;
+      try {
+        const mod = await import(OPENCC_ESM_URL);
+        const OpenCC = mod.default || mod;
+        const converter = OpenCC.Converter({ config: configName });
+        await converter(WARMUP_TEXT);
+        return converter;
+      } catch (err) {
+        converterPromises.delete(configName);
+        throw err;
+      }
     })();
     converterPromises.set(configName, promise);
-    promise.catch(() => converterPromises.delete(configName));
     return promise;
   }
 
@@ -256,8 +271,6 @@
 
       stopObserving(true);
 
-      const prevQueue = queue;
-      const prevQueued = queuedNodes;
       queue = [];
       queuedNodes = new WeakSet();
       const count = collectTextNodes(document.body, false);
@@ -266,8 +279,6 @@
         setStatus(`Queued ${count} text nodes`, true);
         scheduleProcess(0);
       } else {
-        queue = prevQueue;
-        queuedNodes = prevQueued;
         setStatus(STATUS_ON_PREFIX + config);
       }
 
@@ -311,12 +322,12 @@
         if (!chunk.length) { await yieldToBrowser(); continue; }
 
         setStatus(`Converting… ${queue.length} left`, true);
-        const results = [];
+        const converted = [];
         for (const item of chunk) {
           if (!enabled || generation !== myGeneration || config !== myConfig) break;
-          let converted;
+          let result;
           try {
-            converted = await converter(item.original);
+            result = await converter(item.original);
             converterErrorCount = 0;
           } catch (err) {
             converterErrorCount++;
@@ -328,7 +339,7 @@
             await new Promise(resolve => setTimeout(resolve, 200 * converterErrorCount));
             continue;
           }
-          results.push(converted);
+          converted.push({ item, result });
         }
 
         if (!enabled || generation !== myGeneration || config !== myConfig) break;
@@ -336,13 +347,12 @@
         writingBack = true;
         stopObserving(false);
         try {
-          for (let i = 0; i < results.length; i++) {
+          for (const { item, result } of converted) {
             if (!enabled || generation !== myGeneration || config !== myConfig) break;
-            const item = chunk[i];
             const currentState = getNodeState(item.node);
             if (currentState !== item.state || item.state.version !== item.version) continue;
             if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
-            const convertedText = String(results[i]);
+            const convertedText = String(result);
             if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
             item.state.convertedConfig = myConfig;
             item.state.convertedText = convertedText;
@@ -475,84 +485,125 @@
     document.body.appendChild(host);
     const root = host.attachShadow({ mode: "open" });
 
-    root.innerHTML = `<style>
-:host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(10,10,18,.88);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.09);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a}
-*{box-sizing:border-box;margin:0;padding:0}
-@keyframes dotBlink{0%,100%{opacity:1}50%{opacity:.3}}
-@keyframes panelIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-@keyframes panelOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(8px)}}
-.fab{position:absolute;right:0;bottom:0;width:52px;height:52px;z-index:2;border-radius:16px;border:1px solid var(--border-strong);background:var(--bg);backdrop-filter:blur(24px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform .18s ease,box-shadow .2s ease;box-shadow:0 8px 32px rgba(0,0,0,.5)}
-.fab:hover{transform:scale(1.08) translateY(-2px)}
-.fab:active{transform:scale(.95)}
-.fab[hidden]{display:none!important}
-.fab.busy{box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 2px var(--warning)}
-.fab-inner{font-size:18px;line-height:1;color:var(--text-1);font-weight:700}
-.fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border-radius:50%;border:1.5px solid rgba(10,10,18,.9);background:var(--text-3);transition:background .3s ease}
-.fab-dot.on{background:var(--success)}
-.fab-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}
-.fab-dot.error{background:var(--danger)}
-.panel{position:absolute;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 24px 64px rgba(0,0,0,.6);overflow:hidden;animation:panelIn .2s ease}
-.panel[hidden]{display:none!important}
-.panel.collapsing{animation:panelOut .18s ease forwards;pointer-events:none}
-.header{display:flex;align-items:center;gap:8px;padding:11px 14px 10px;cursor:grab;user-select:none;-webkit-user-select:none;border-bottom:1px solid var(--border)}
-.header:active{cursor:grabbing}
-.header-dot{width:7px;height:7px;border-radius:50%;background:var(--text-3);flex-shrink:0;transition:background .3s}
-.header-dot.on{background:var(--success)}
-.header-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}
-.header-dot.error{background:var(--danger)}
-.header-label{font-size:13px;font-weight:700;color:var(--text-2);letter-spacing:.08em;text-transform:uppercase;flex-shrink:0}
-.header-status{flex:1;font-size:12px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:ui-monospace,"SF Mono",monospace;transition:color .3s}
-.header-status.busy{color:var(--warning)}
-.header-status.error{color:var(--danger)}
-.body{padding:10px 0 12px;display:flex;height:200px}
-.body-left{width:78px;flex-shrink:0;display:flex;flex-direction:column;padding:0 8px;gap:4px;border-right:1px solid var(--border)}
-.categories{display:flex;flex-direction:column;gap:4px;flex:1}
-.cat-btn{flex:1;border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--text-3);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1.25;text-align:center}
-.cat-btn:hover{border-color:var(--border-strong);color:var(--text-2);background:var(--bg-card)}
-.cat-btn.active{color:#fff;border-color:transparent;background:var(--cat-color,var(--primary))}
-.body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}
-.config-list{flex:1;overflow-y:scroll;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
-@keyframes listFade{from{opacity:0}to{opacity:1}}
-.config-list.switching{animation:listFade .15s ease}
-.config-list::-webkit-scrollbar{width:3px}
-.config-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-.config-item{display:flex;align-items:flex-start;gap:7px;padding:5px 8px;border-radius:7px;cursor:pointer;transition:background .12s;border:1px solid transparent}
-.config-item:hover{background:var(--bg-card);border-color:var(--border)}
-.config-item.selected{background:rgba(124,106,247,.1);border-color:rgba(124,106,247,.25)}
-.config-radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--text-3);flex-shrink:0;margin-top:2px;display:flex;align-items:center;justify-content:center;transition:border-color .15s}
-.config-item.selected .config-radio{border-color:var(--primary)}
-.config-radio::after{content:"";width:5px;height:5px;border-radius:50%;background:var(--primary);opacity:0;transition:opacity .15s}
-.config-item.selected .config-radio::after{opacity:1}
-.config-label{font-size:13px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}
-.config-item.selected .config-label{color:var(--text-1)}
-.btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s;display:flex;align-items:center;justify-content:center}
-.btn:hover{opacity:.85}
-.btn:active{transform:scale(.97)}
-.btn-primary{background:linear-gradient(135deg,#6d5af0,#9b6fff);border-color:rgba(150,120,255,.25);color:#fff}
-.btn-danger{background:linear-gradient(135deg,#e8415a,#f07);border-color:rgba(240,80,100,.25);color:#fff}
-.footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.footer-version{font-size:11px;color:var(--text-3);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
-.footer-hint{font-size:10px;color:var(--text-3);opacity:.5}
-</style>
-<div class="fab" id="fab" title="OpenCC-WASM — 拖拽移动"><div class="fab-inner">文</div><div class="fab-dot" id="fabDot"></div></div>
-<div class="panel" id="panel" hidden>
-<div class="header" id="header"><div class="header-dot" id="headerDot"></div><span class="header-label">OpenCC</span><div class="header-status" id="status"></div></div>
-<div id="body" class="body"><div class="body-left"><div class="categories" id="categories"></div></div><div class="body-right"><div class="config-list" id="configList"></div><button id="toggle" class="btn"></button></div></div>
-<div class="footer"><span class="footer-version">opencc-wasm 0.8.2</span><span class="footer-hint">拖拽移动</span></div>
-</div>`;
+    const style = document.createElement("style");
+    style.textContent = [
+      `:host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(10,10,18,.88);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.09);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a}`,
+      `*{box-sizing:border-box;margin:0;padding:0}`,
+      `@keyframes dotBlink{0%,100%{opacity:1}50%{opacity:.3}}`,
+      `@keyframes panelIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}`,
+      `@keyframes panelOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(8px)}}`,
+      `.fab{position:absolute;right:0;bottom:0;width:52px;height:52px;z-index:2;border-radius:16px;border:1px solid var(--border-strong);background:var(--bg);backdrop-filter:blur(24px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform .18s ease,box-shadow .2s ease;box-shadow:0 8px 32px rgba(0,0,0,.5)}`,
+      `.fab:hover{transform:scale(1.08) translateY(-2px)}`,
+      `.fab:active{transform:scale(.95)}`,
+      `.fab[hidden]{display:none!important}`,
+      `.fab.busy{box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 2px var(--warning)}`,
+      `.fab-inner{font-size:18px;line-height:1;color:var(--text-1);font-weight:700}`,
+      `.fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border-radius:50%;border:1.5px solid rgba(10,10,18,.9);background:var(--text-3);transition:background .3s ease}`,
+      `.fab-dot.on{background:var(--success)}`,
+      `.fab-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}`,
+      `.fab-dot.error{background:var(--danger)}`,
+      `.panel{position:absolute;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 24px 64px rgba(0,0,0,.6);overflow:hidden;animation:panelIn .2s ease}`,
+      `.panel[hidden]{display:none!important}`,
+      `.panel.collapsing{animation:panelOut .18s ease forwards;pointer-events:none}`,
+      `.header{display:flex;align-items:center;gap:8px;padding:11px 14px 10px;cursor:grab;user-select:none;-webkit-user-select:none;border-bottom:1px solid var(--border)}`,
+      `.header:active{cursor:grabbing}`,
+      `.header-dot{width:7px;height:7px;border-radius:50%;background:var(--text-3);flex-shrink:0;transition:background .3s}`,
+      `.header-dot.on{background:var(--success)}`,
+      `.header-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}`,
+      `.header-dot.error{background:var(--danger)}`,
+      `.header-label{font-size:13px;font-weight:700;color:var(--text-2);letter-spacing:.08em;text-transform:uppercase;flex-shrink:0}`,
+      `.header-status{flex:1;font-size:12px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:ui-monospace,"SF Mono",monospace;transition:color .3s}`,
+      `.header-status.busy{color:var(--warning)}`,
+      `.header-status.error{color:var(--danger)}`,
+      `.body{padding:10px 0 12px;display:flex;height:200px}`,
+      `.body-left{width:78px;flex-shrink:0;display:flex;flex-direction:column;padding:0 8px;gap:4px;border-right:1px solid var(--border)}`,
+      `.categories{display:flex;flex-direction:column;gap:4px;flex:1}`,
+      `.cat-btn{flex:1;border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--text-3);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1.25;text-align:center}`,
+      `.cat-btn:hover{border-color:var(--border-strong);color:var(--text-2);background:var(--bg-card)}`,
+      `.cat-btn.active{color:#fff;border-color:transparent;background:var(--cat-color,var(--primary))}`,
+      `.body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}`,
+      `.config-list{flex:1;overflow-y:scroll;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}`,
+      `@keyframes listFade{from{opacity:0}to{opacity:1}}`,
+      `.config-list.switching{animation:listFade .15s ease}`,
+      `.config-list::-webkit-scrollbar{width:3px}`,
+      `.config-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}`,
+      `.config-item{display:flex;align-items:flex-start;gap:7px;padding:5px 8px;border-radius:7px;cursor:pointer;transition:background .12s;border:1px solid transparent}`,
+      `.config-item:hover{background:var(--bg-card);border-color:var(--border)}`,
+      `.config-item.selected{background:rgba(124,106,247,.1);border-color:rgba(124,106,247,.25)}`,
+      `.config-radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--text-3);flex-shrink:0;margin-top:2px;display:flex;align-items:center;justify-content:center;transition:border-color .15s}`,
+      `.config-item.selected .config-radio{border-color:var(--primary)}`,
+      `.config-radio::after{content:"";width:5px;height:5px;border-radius:50%;background:var(--primary);opacity:0;transition:opacity .15s}`,
+      `.config-item.selected .config-radio::after{opacity:1}`,
+      `.config-label{font-size:13px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}`,
+      `.config-item.selected .config-label{color:var(--text-1)}`,
+      `.btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s;display:flex;align-items:center;justify-content:center}`,
+      `.btn:hover{opacity:.85}`,
+      `.btn:active{transform:scale(.97)}`,
+      `.btn-primary{background:linear-gradient(135deg,#6d5af0,#9b6fff);border-color:rgba(150,120,255,.25);color:#fff}`,
+      `.btn-danger{background:linear-gradient(135deg,#e8415a,#f07);border-color:rgba(240,80,100,.25);color:#fff}`,
+      `.footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}`,
+      `.footer-version{font-size:11px;color:var(--text-3);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}`,
+      `.footer-hint{font-size:10px;color:var(--text-3);opacity:.5}`,
+    ].join("\n");
+
+    function el(tag, attrs = {}, ...children) {
+      const node = document.createElement(tag);
+      for (const [k, v] of Object.entries(attrs)) {
+        if (k === "className") node.className = v;
+        else node.setAttribute(k, v);
+      }
+      for (const child of children) node.appendChild(child);
+      return node;
+    }
+    function txt(content) { return document.createTextNode(content); }
+
+    const fabDot    = el("div",  { id: "fabDot",    className: "fab-dot" });
+    const fabInner  = el("div",  { className: "fab-inner" }, txt("文"));
+    const fab       = el("div",  { id: "fab", className: "fab", title: "OpenCC-WASM — 拖拽移动" },
+                       fabInner, fabDot);
+
+    const headerDot    = el("div",  { id: "headerDot", className: "header-dot" });
+    const headerLabel  = el("span", { className: "header-label" }, txt("OpenCC"));
+    const statusEl     = el("div",  { id: "status",    className: "header-status" });
+    const header       = el("div",  { id: "header",    className: "header" },
+                           headerDot, headerLabel, statusEl);
+
+    const categoriesEl = el("div", { id: "categories", className: "categories" });
+    const bodyLeft     = el("div", { className: "body-left" },
+                           el("div", { className: "body-left" }, categoriesEl));
+
+    const configList = el("div",    { id: "configList", className: "config-list" });
+    const toggle     = el("button", { id: "toggle",     className: "btn" });
+    const bodyRight  = el("div",    { className: "body-right" }, configList, toggle);
+
+    const bodyEl = el("div", { id: "body", className: "body" },
+      el("div", { className: "body-left" }, categoriesEl),
+      bodyRight,
+    );
+
+    const footerVersion = el("span", { className: "footer-version" }, txt("opencc-wasm 0.8.2"));
+    const footerHint    = el("span", { className: "footer-hint" },    txt("拖拽移动"));
+    const footer        = el("div",  { className: "footer" }, footerVersion, footerHint);
+
+    const panel = el("div", { id: "panel", className: "panel" }, header, bodyEl, footer);
+    panel.hidden = true;
+
+    root.appendChild(style);
+    root.appendChild(fab);
+    root.appendChild(panel);
 
     ui = {
       host, root,
-      status:     root.getElementById("status"),
-      configList: root.getElementById("configList"),
-      categories: root.getElementById("categories"),
-      toggle:     root.getElementById("toggle"),
-      body:       root.getElementById("body"),
-      fab:        root.getElementById("fab"),
-      panel:      root.getElementById("panel"),
-      fabDot:     root.getElementById("fabDot"),
-      headerDot:  root.getElementById("headerDot"),
-      header:     root.getElementById("header"),
+      status:     statusEl,
+      configList,
+      categories: categoriesEl,
+      toggle,
+      body:       bodyEl,
+      fab,
+      panel,
+      fabDot,
+      headerDot,
+      header,
       activeCategory: findGroupForConfig(config),
     };
 
@@ -571,8 +622,8 @@
 
     ui.toggle.addEventListener("click", () => setEnabled(!enabled));
 
-    if (!createPanel._outsideClickBound) {
-      createPanel._outsideClickBound = true;
+    if (!outsideClickBound) {
+      outsideClickBound = true;
       const onOutsideClick = (e) => {
         if (collapsed) return;
         if (!ui || !ui.host) return;
@@ -594,9 +645,8 @@
     const group = CONFIG_GROUPS.find(g => g.id === ui.activeCategory) || CONFIG_GROUPS[0];
     const list = ui.configList;
     list.innerHTML = "";
-    list.classList.remove("switching");
-    void list.offsetWidth;
     list.classList.add("switching");
+    list.getAnimations().forEach(a => { a.cancel(); a.play(); });
     for (const [value, label] of group.configs) {
       const item = document.createElement("div");
       item.className = "config-item" + (value === config ? " selected" : "");
@@ -666,7 +716,9 @@
   }
 
   function setStatus(text, busy = false, error = false) {
-    latestStatus = text; latestBusy = busy; latestError = error;
+    latestStatus = text;
+    latestBusy = busy;
+    latestError = error;
     if (!ui || !ui.status) return;
     ui.status.textContent = text;
     ui.status.classList.toggle("busy", busy);
@@ -682,10 +734,9 @@
     if (savedPos && typeof savedPos.left === "number") applyPosition(savedPos.left, savedPos.top);
 
     function applyPosition(left, top) {
-      const hostW = 52;
-      const hostH = 52;
-      const maxL  = window.innerWidth  - hostW;
-      const maxT  = window.innerHeight - hostH;
+      const { offsetWidth: hostW, offsetHeight: hostH } = ui.host;
+      const maxL = window.innerWidth  - hostW;
+      const maxT = window.innerHeight - hostH;
       ui.host.style.right  = "auto";
       ui.host.style.bottom = "auto";
       ui.host.style.left   = Math.max(0, Math.min(left, maxL)) + "px";
