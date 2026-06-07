@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.6.0
+// @version      3.7.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -14,16 +14,18 @@
 (function () {
   "use strict";
 
-  const OPENCC_ESM_URL = "https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js";
-  const DEFAULT_CONFIG = "s2twp";
-  const DEFAULT_ENABLED = true;
-  const CHUNK_SIZE = 80;
-  const PROCESS_DEBOUNCE_MS = 80;
-  const FULL_SCAN_DEBOUNCE_MS = 60;
-  const MAX_CONVERTER_ERRORS = 5;
-  const PANEL_ID = "opencc-wasm-tm-panel-host";
-  const STORE_PREFIX = "openccWasmUserscript.";
-  const WARMUP_TEXT = "伺服器发现資訊只鸡";
+  const OPENCC_VERSION   = "0.8.2";
+  const OPENCC_ESM_URL   = `https://cdn.jsdelivr.net/npm/opencc-wasm@${OPENCC_VERSION}/dist/esm/index.js`;
+  const DEFAULT_CONFIG   = "s2twp";
+  const DEFAULT_ENABLED  = true;
+  const CHUNK_SIZE              = 80;
+  const PROCESS_DEBOUNCE_MS     = 80;
+  const FULL_SCAN_DEBOUNCE_MS   = 60;
+  const MAX_CONVERTER_ERRORS    = 5;
+  const MAX_CONVERTER_RETRIES   = 3;
+  const PANEL_ID         = "opencc-wasm-tm-panel-host";
+  const STORE_PREFIX     = "openccWasmUserscript.";
+  const WARMUP_TEXT      = "伺服器发现資訊只鸡";
   const STATUS_ON_PREFIX = "On · ";
 
   const CONFIG_GROUPS = [
@@ -59,8 +61,7 @@
     ]},
   ];
 
-  const CONFIG_VALUES = new Set(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => v)));
-  const CONFIG_INDEX  = new Map(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => [v, g.id])));
+  const CONFIG_MAP = new Map(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => [v, g.id])));
 
   const SKIP_SELECTOR = [
     `#${PANEL_ID}`, "[data-opencc-ignore]", "script", "style", "noscript", "template",
@@ -69,28 +70,30 @@
 
   const HAS_HAN = /\p{Script=Han}/u;
 
+  const yieldToMain = () => scheduler.yield();
+
   const state = {
     config:              readConfig(),
-    enabled:             storeGet("enabled", DEFAULT_ENABLED),
-    collapsed:           storeGet("collapsed", false),
+    enabled:             readBool("enabled", DEFAULT_ENABLED),
+    collapsed:           readBool("collapsed", false),
     queue:               [],
     queuedNodes:         new WeakSet(),
     processing:          false,
     writingBack:         false,
     generation:          0,
     observing:           false,
-    processTimer:        0,
-    fullScanTimer:       0,
+    processTimer:        null,
+    fullScanTimer:       null,
     collapsing:          false,
     converterErrorCount: 0,
     status:              { text: "", busy: false, error: false },
     ui:                  null,
   };
 
-  state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
+  state.status.text = state.enabled ? statusOnText() : "Off";
 
   const nodeStates = new WeakMap();
-  const converterPromises = new Map();
+  const converterCache = new Map();
   const observer = new MutationObserver(handleMutations);
 
   main().catch(err => {
@@ -108,9 +111,16 @@
     else setStatus("Off");
   }
 
+  function statusOnText() { return STATUS_ON_PREFIX + state.config; }
+
   function readConfig() {
     const saved = storeGet("config", DEFAULT_CONFIG);
-    return CONFIG_VALUES.has(saved) ? saved : DEFAULT_CONFIG;
+    return CONFIG_MAP.has(saved) ? saved : DEFAULT_CONFIG;
+  }
+
+  function readBool(key, fallback) {
+    const raw = storeGet(key, fallback);
+    return typeof raw === "boolean" ? raw : fallback;
   }
 
   function storeGet(key, fallback) {
@@ -131,21 +141,29 @@
     }
   }
 
-  async function getConverter(configName) {
-    if (converterPromises.has(configName)) return converterPromises.get(configName);
-    const promise = (async () => {
+  function getConverter(configName) {
+    if (converterCache.has(configName)) return converterCache.get(configName);
+    let retries = 0;
+    async function attempt() {
       try {
         const mod = await import(OPENCC_ESM_URL);
         const OpenCC = mod.default || mod;
         const converter = OpenCC.Converter({ config: configName });
+        if (typeof converter !== "function") throw new TypeError("Converter is not callable");
         await converter(WARMUP_TEXT);
         return converter;
       } catch (err) {
-        converterPromises.delete(configName);
-        throw err;
+        converterCache.delete(configName);
+        retries++;
+        if (retries >= MAX_CONVERTER_RETRIES) throw err;
+        await new Promise(r => setTimeout(r, 500 * retries));
+        const next = attempt();
+        converterCache.set(configName, next);
+        return next;
       }
-    })();
-    converterPromises.set(configName, promise);
+    }
+    const promise = attempt();
+    converterCache.set(configName, promise);
     return promise;
   }
 
@@ -222,9 +240,9 @@
 
   function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
     if (!state.enabled) return;
-    if (state.fullScanTimer) clearTimeout(state.fullScanTimer);
+    if (state.fullScanTimer !== null) clearTimeout(state.fullScanTimer);
     state.fullScanTimer = setTimeout(() => {
-      state.fullScanTimer = 0;
+      state.fullScanTimer = null;
       if (!state.enabled || !document.body) return;
       stopObserving(true);
       clearQueue();
@@ -233,7 +251,7 @@
         setStatus(`Queued ${count} text nodes`, true);
         scheduleProcess(0);
       } else {
-        setStatus(STATUS_ON_PREFIX + state.config);
+        setStatus(statusOnText());
       }
       if (state.enabled) startObserving();
     }, delay);
@@ -241,23 +259,28 @@
 
   function scheduleProcess(delay = PROCESS_DEBOUNCE_MS) {
     if (!state.enabled) return;
-    if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
-    state.processTimer = setTimeout(() => { state.processTimer = 0; void processQueue(); }, delay);
+    if (state.processTimer !== null) { clearTimeout(state.processTimer); state.processTimer = null; }
+    state.processTimer = setTimeout(() => { state.processTimer = null; void processQueue(); }, delay);
   }
 
   async function processQueue() {
     if (state.processing || !state.enabled) return;
-    if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
-    if (!state.queue.length) { setStatus(STATUS_ON_PREFIX + state.config); return; }
+    if (state.processTimer !== null) { clearTimeout(state.processTimer); state.processTimer = null; }
+    if (!state.queue.length) { setStatus(statusOnText()); return; }
+
     state.processing = true;
     const myGeneration = state.generation;
     const myConfig = state.config;
+
+    const isStale = () =>
+      !state.enabled || state.generation !== myGeneration || state.config !== myConfig;
+
     try {
       setStatus(`Loading ${myConfig}…`, true);
       const converter = await getConverter(myConfig);
-      if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) return;
+      if (isStale()) return;
 
-      while (state.enabled && state.generation === myGeneration && state.config === myConfig && state.queue.length) {
+      while (!isStale() && state.queue.length) {
         const chunk = [];
         while (state.queue.length && chunk.length < CHUNK_SIZE) {
           const node = state.queue.shift();
@@ -268,12 +291,12 @@
           if (ns.convertedConfig === myConfig && node.nodeValue === ns.convertedText) continue;
           chunk.push({ node, state: ns, version: ns.version, original: ns.original });
         }
-        if (!chunk.length) { await scheduler.yield(); continue; }
+        if (!chunk.length) { await yieldToMain(); continue; }
 
         setStatus(`Converting… ${state.queue.length} left`, true);
         const converted = [];
         for (const item of chunk) {
-          if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
+          if (isStale()) break;
           let result;
           try {
             result = await converter(item.original);
@@ -291,15 +314,21 @@
           converted.push({ item, result });
         }
 
-        if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
+        if (isStale()) break;
 
         state.writingBack = true;
         stopObserving(false);
         try {
           for (const { item, result } of converted) {
-            if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
+            if (isStale()) break;
             const currentState = nodeStates.get(item.node);
-            if (currentState !== item.state || item.state.version !== item.version) continue;
+            if (currentState !== item.state || item.state.version !== item.version) {
+              if (currentState) {
+                currentState.convertedConfig = null;
+                currentState.convertedText = null;
+              }
+              continue;
+            }
             if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
             const convertedText = String(result);
             if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
@@ -310,11 +339,10 @@
           state.writingBack = false;
           if (state.enabled) startObserving();
         }
-        await scheduler.yield();
+        await yieldToMain();
       }
 
-      if (state.enabled && state.generation === myGeneration && state.config === myConfig)
-        setStatus(STATUS_ON_PREFIX + myConfig);
+      if (!isStale()) setStatus(statusOnText());
     } catch (err) {
       console.error("[OpenCC-WASM userscript] OpenCC load/process error:", err);
       setStatus("OpenCC error", false, true);
@@ -356,20 +384,56 @@
   }
 
   function clearScheduledTimers() {
-    if (state.processTimer)  { clearTimeout(state.processTimer);  state.processTimer  = 0; }
-    if (state.fullScanTimer) { clearTimeout(state.fullScanTimer); state.fullScanTimer = 0; }
+    if (state.processTimer  !== null) { clearTimeout(state.processTimer);  state.processTimer  = null; }
+    if (state.fullScanTimer !== null) { clearTimeout(state.fullScanTimer); state.fullScanTimer = null; }
   }
 
   function restoreOriginals() {
     clearScheduledTimers();
     stopObserving(false);
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+      {
+        acceptNode(node) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_SKIP;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
     let node;
     while ((node = walker.nextNode())) {
       const ns = nodeStates.get(node);
       if (ns && node.isConnected && node.nodeValue !== ns.original) node.nodeValue = ns.original;
     }
     clearQueue();
+  }
+
+  function setPanelVisible(visible) {
+    if (!state.ui) return;
+    const { panel, fab } = state.ui;
+    if (visible) {
+      fab.hidden = true;
+      panel.hidden = false;
+      panel.classList.remove("collapsing");
+      state.collapsing = false;
+    } else if (!panel.hidden && !state.collapsing) {
+      state.collapsing = true;
+      panel.classList.add("collapsing");
+      panel.addEventListener("animationend", function onEnd() {
+        panel.removeEventListener("animationend", onEnd);
+        panel.classList.remove("collapsing");
+        panel.hidden = true;
+        fab.hidden = false;
+        state.collapsing = false;
+      }, { once: true });
+    } else if (!state.collapsing) {
+      panel.hidden = true;
+      fab.hidden = false;
+    }
   }
 
   function setEnabled(nextEnabled) {
@@ -386,7 +450,7 @@
     } else {
       state.enabled = true;
       storeSet("enabled", true);
-      setStatus(STATUS_ON_PREFIX + state.config, true);
+      setStatus(statusOnText(), true);
       startObserving();
       scheduleFullScan(0);
     }
@@ -394,7 +458,7 @@
   }
 
   function setConfig(nextConfig) {
-    if (!CONFIG_VALUES.has(nextConfig)) return;
+    if (!CONFIG_MAP.has(nextConfig)) return;
     if (nextConfig === state.config) { refreshControls(); return; }
     state.config = nextConfig;
     storeSet("config", state.config);
@@ -433,7 +497,7 @@
 .panel{position:absolute;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 24px 64px rgba(0,0,0,.6);overflow:hidden;animation:panelIn .2s ease}
 .panel[hidden]{display:none!important}
 .panel.collapsing{animation:panelOut .18s ease forwards;pointer-events:none}
-.header{display:flex;align-items:center;gap:8px;padding:11px 14px 10px;cursor:grab;user-select:none;-webkit-user-select:none;border-bottom:1px solid var(--border)}
+.header{display:flex;align-items:center;gap:8px;padding:11px 14px 10px;cursor:grab;user-select:none;border-bottom:1px solid var(--border)}
 .header:active{cursor:grabbing}
 .header-dot{width:7px;height:7px;border-radius:50%;background:var(--text-3);flex-shrink:0;transition:background .3s}
 .header-dot.on{background:var(--success)}
@@ -474,15 +538,10 @@
 .footer-hint{font-size:10px;color:var(--text-3);opacity:.5}
 `;
 
-    function el(tag, attrs = {}, ...children) {
+    function el(tag, props = {}, ...children) {
       const node = document.createElement(tag);
-      for (const [k, v] of Object.entries(attrs)) {
-        if (k === "className") node.className = v;
-        else node.setAttribute(k, v);
-      }
-      for (const child of children) {
-        node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
-      }
+      for (const [k, v] of Object.entries(props)) node[k] = v;
+      if (children.length) node.append(...children);
       return node;
     }
 
@@ -504,7 +563,7 @@
     );
 
     const footer = el("div", { className: "footer" },
-      el("span", { className: "footer-version" }, "opencc-wasm 0.8.2"),
+      el("span", { className: "footer-version" }, `opencc-wasm ${OPENCC_VERSION}`),
       el("span", { className: "footer-hint" }, "拖拽移动"),
     );
 
@@ -519,7 +578,7 @@
       host, root, status: statusEl, configList,
       categories: categoriesEl, toggle, fab, panel,
       fabDot, headerDot, header,
-      activeCategory: CONFIG_INDEX.get(state.config),
+      activeCategory: CONFIG_MAP.get(state.config),
     };
 
     for (const group of CONFIG_GROUPS) {
@@ -541,14 +600,14 @@
 
     toggle.addEventListener("click", () => setEnabled(!state.enabled));
 
-    document.addEventListener("mousedown", (e) => {
+    document.addEventListener("pointerdown", (e) => {
       if (state.collapsed || !state.ui) return;
-      if (!state.ui.host.shadowRoot.contains(e.composedPath()[0])) {
+      if (!root.contains(e.composedPath()[0])) {
         state.collapsed = true;
         storeSet("collapsed", state.collapsed);
         refreshControls();
       }
-    }, { capture: false });
+    }, { capture: true });
 
     setupDrag();
     refreshControls();
@@ -560,7 +619,7 @@
     const list = state.ui.configList;
     list.innerHTML = "";
     list.classList.remove("switching");
-    void list.offsetWidth;
+    list.offsetWidth;
     list.classList.add("switching");
     for (const [value, label] of group.configs) {
       const item = document.createElement("div");
@@ -590,33 +649,11 @@
 
   function refreshControls() {
     if (!state.ui) return;
-    const catId = CONFIG_INDEX.get(state.config);
+    const catId = CONFIG_MAP.get(state.config);
     if (state.ui.activeCategory !== catId) { state.ui.activeCategory = catId; populateConfigList(); }
     else updateConfigListSelection();
     updateCategoryTabs();
-
-    if (state.collapsed) {
-      if (!state.ui.panel.hidden && !state.collapsing) {
-        state.collapsing = true;
-        state.ui.panel.classList.add("collapsing");
-        state.ui.panel.addEventListener("animationend", function onEnd() {
-          state.ui.panel.removeEventListener("animationend", onEnd);
-          state.ui.panel.classList.remove("collapsing");
-          state.ui.panel.hidden = true;
-          state.ui.fab.hidden = false;
-          state.collapsing = false;
-        }, { once: true });
-      } else if (!state.collapsing) {
-        state.ui.panel.hidden = true;
-        state.ui.fab.hidden = false;
-      }
-    } else {
-      state.ui.fab.hidden = true;
-      state.ui.panel.hidden = false;
-      state.ui.panel.classList.remove("collapsing");
-      state.collapsing = false;
-    }
-
+    setPanelVisible(!state.collapsed);
     state.ui.toggle.textContent = state.enabled ? "关" : "开";
     state.ui.toggle.className = "btn " + (state.enabled ? "btn-danger" : "btn-primary");
     updateStatusDots();
@@ -642,13 +679,12 @@
 
   function setupDrag() {
     if (!state.ui) return;
-    let startX, startY, startLeft, startTop, moved = false;
+    let startX, startY, startLeft, startTop, hostW, hostH, moved = false;
     const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
     if (savedPos && typeof savedPos.left === "number") applyPosition(savedPos.left, savedPos.top);
 
     function applyPosition(left, top) {
-      const { offsetWidth: hostW, offsetHeight: hostH } = state.ui.host;
       const maxL = window.innerWidth  - hostW;
       const maxT = window.innerHeight - hostH;
       state.ui.host.style.right  = "auto";
@@ -689,6 +725,8 @@
 
     window.addEventListener("resize", () => requestAnimationFrame(() => {
       const rect = state.ui.host.getBoundingClientRect();
+      hostW = rect.width;
+      hostH = rect.height;
       applyPosition(rect.left, rect.top);
       syncDirection();
     }));
@@ -698,6 +736,7 @@
       startX = clientX; startY = clientY;
       const rect = state.ui.host.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
+      hostW = rect.width; hostH = rect.height;
       applyPosition(startLeft, startTop);
     }
 
@@ -735,6 +774,10 @@
       document.addEventListener("mouseup", onMouseUp);
       e.preventDefault();
     }
+
+    const initRect = state.ui.host.getBoundingClientRect();
+    hostW = initRect.width || 52;
+    hostH = initRect.height || 52;
 
     requestAnimationFrame(updatePanelDirection);
 
