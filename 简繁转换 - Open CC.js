@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.4.0
+// @version      3.5.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -21,7 +21,7 @@
   const PROCESS_DEBOUNCE_MS = 80;
   const FULL_SCAN_DEBOUNCE_MS = 60;
   const PRUNE_DELAY_MS = 2000;
-  const SWEEP_INTERVAL_MS = 8000;
+  const MAX_CONVERTER_ERRORS = 5;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
   const STORE_PREFIX = "openccWasmUserscript.";
   const WARMUP_TEXT = "伺服器发现資訊只鸡";
@@ -60,55 +60,40 @@
     ]},
   ];
 
-  const CONFIGS = CONFIG_GROUPS.flatMap(g => g.configs);
-  const CONFIG_VALUES = new Set(CONFIGS.map(([v]) => v));
-
-  const CONFIG_INDEX = new Map(
-    CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => [v, g.id]))
-  );
+  const CONFIG_VALUES = new Set(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => v)));
+  const CONFIG_INDEX  = new Map(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => [v, g.id])));
 
   const SKIP_SELECTOR = [
     `#${PANEL_ID}`, "[data-opencc-ignore]", "script", "style", "noscript", "template",
     "textarea", "input", "select", "option", "code", "pre", "kbd", "samp", "svg", "math", "canvas",
   ].join(",");
 
-  const HAS_HAN = (() => {
-    try { return new RegExp("\\p{Script=Han}", "u"); }
-    catch (_) { return /[\u3400-\u9fff\uf900-\ufaff]/; }
-  })();
+  const HAS_HAN = new RegExp("\\p{Script=Han}", "u");
 
-  let config = readConfig();
-  let enabled = Boolean(storeGet("enabled", DEFAULT_ENABLED));
-  let collapsed = Boolean(storeGet("collapsed", false));
+  const state = {
+    config:             readConfig(),
+    enabled:            Boolean(storeGet("enabled", DEFAULT_ENABLED)),
+    collapsed:          Boolean(storeGet("collapsed", false)),
+    queue:              [],
+    queuedNodes:        new WeakSet(),
+    processing:         false,
+    writingBack:        false,
+    generation:         0,
+    observing:          false,
+    processTimer:       0,
+    fullScanTimer:      0,
+    pruneTimer:         0,
+    collapsing:         false,
+    converterErrorCount:0,
+    status:             { text: "", busy: false, error: false },
+    ui:                 null,
+  };
+
+  state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
+
+  const nodeStates = new WeakMap();
 
   const converterPromises = new Map();
-
-  const nodeEntries = new Map();
-
-  setInterval(() => {
-    for (const [key, entry] of nodeEntries) {
-      const node = entry.ref.deref();
-      if (!node || !node.isConnected) nodeEntries.delete(key);
-    }
-  }, SWEEP_INTERVAL_MS);
-
-  let queue = [];
-  let queuedNodes = new WeakSet();
-  let processing = false;
-  let writingBack = false;
-  let generation = 0;
-  let observing = false;
-  let processTimer = 0;
-  let fullScanTimer = 0;
-  let pruneTimer = 0;
-  let latestStatus = enabled ? STATUS_ON_PREFIX + config : "Off";
-  let latestBusy = false;
-  let latestError = false;
-  let ui = null;
-  let collapsing = false;
-  let converterErrorCount = 0;
-  let outsideClickBound = false;
-  const MAX_CONVERTER_ERRORS = 5;
 
   const observer = new MutationObserver(handleMutations);
 
@@ -122,7 +107,7 @@
     await domReady();
     if (!document.body) return;
     createPanel();
-    if (enabled) { startObserving(); scheduleFullScan(0); }
+    if (state.enabled) { startObserving(); scheduleFullScan(0); }
     else setStatus("Off");
   }
 
@@ -188,45 +173,36 @@
     return true;
   }
 
-  let _nodeKeyCounter = 0;
-  const _nodeKeys = new WeakMap();
-  function nodeKey(node) {
-    if (!_nodeKeys.has(node)) _nodeKeys.set(node, ++_nodeKeyCounter);
-    return _nodeKeys.get(node);
-  }
-
   function rememberOriginal(node, resetOriginal = false) {
-    const key = nodeKey(node);
-    let entry = nodeEntries.get(key);
+    let entry = nodeStates.get(node);
     if (!entry) {
-      entry = {
-        state: { original: node.nodeValue, version: 1, convertedConfig: null, convertedText: null },
-        ref: new WeakRef(node),
-      };
-      nodeEntries.set(key, entry);
+      entry = { original: node.nodeValue, version: 1, convertedConfig: null, convertedText: null };
+      nodeStates.set(node, entry);
     } else if (resetOriginal) {
-      entry.state = {
-        original: node.nodeValue,
-        version: entry.state.version + 1,
-        convertedConfig: null,
-        convertedText: null,
-      };
+      entry.original = node.nodeValue;
+      entry.version++;
+      entry.convertedConfig = null;
+      entry.convertedText = null;
     }
-    return entry.state;
+    return entry;
   }
 
   function getNodeState(node) {
-    return nodeEntries.get(nodeKey(node))?.state;
+    return nodeStates.get(node);
   }
 
   function deleteNodeState(node) {
-    nodeEntries.delete(nodeKey(node));
+    nodeStates.delete(node);
   }
 
   function enqueueTextNode(node, resetOriginal = false) {
     if (!shouldProcessTextNode(node)) return false;
     rememberOriginal(node, resetOriginal);
-    if (!queuedNodes.has(node)) { queuedNodes.add(node); queue.push(node); return true; }
+    if (!state.queuedNodes.has(node)) {
+      state.queuedNodes.add(node);
+      state.queue.push(node);
+      return true;
+    }
     return false;
   }
 
@@ -260,95 +236,95 @@
     return count;
   }
 
-  function clearQueue() { queue = []; queuedNodes = new WeakSet(); }
+  function clearQueue() { state.queue = []; state.queuedNodes = new WeakSet(); }
 
   function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
-    if (!enabled) return;
-    if (fullScanTimer) clearTimeout(fullScanTimer);
-    fullScanTimer = setTimeout(() => {
-      fullScanTimer = 0;
-      if (!enabled || !document.body) return;
+    if (!state.enabled) return;
+    if (state.fullScanTimer) clearTimeout(state.fullScanTimer);
+    state.fullScanTimer = setTimeout(() => {
+      state.fullScanTimer = 0;
+      if (!state.enabled || !document.body) return;
 
       stopObserving(true);
 
-      queue = [];
-      queuedNodes = new WeakSet();
+      state.queue = [];
+      state.queuedNodes = new WeakSet();
       const count = collectTextNodes(document.body, false);
 
       if (count > 0) {
         setStatus(`Queued ${count} text nodes`, true);
         scheduleProcess(0);
       } else {
-        setStatus(STATUS_ON_PREFIX + config);
+        setStatus(STATUS_ON_PREFIX + state.config);
       }
 
-      if (enabled) startObserving();
+      if (state.enabled) startObserving();
     }, delay);
   }
 
   function scheduleProcess(delay = PROCESS_DEBOUNCE_MS) {
-    if (!enabled) return;
-    if (processTimer) { clearTimeout(processTimer); processTimer = 0; }
-    processTimer = setTimeout(() => { processTimer = 0; void processQueue(); }, delay);
+    if (!state.enabled) return;
+    if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
+    state.processTimer = setTimeout(() => { state.processTimer = 0; void processQueue(); }, delay);
   }
 
   function yieldToBrowser() {
-    return new Promise(resolve => setTimeout(resolve, 0));
+    return scheduler.yield();
   }
 
   async function processQueue() {
-    if (processing || !enabled) return;
-    if (processTimer) { clearTimeout(processTimer); processTimer = 0; }
-    if (!queue.length) { setStatus(STATUS_ON_PREFIX + config); return; }
-    processing = true;
-    const myGeneration = generation;
-    const myConfig = config;
+    if (state.processing || !state.enabled) return;
+    if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
+    if (!state.queue.length) { setStatus(STATUS_ON_PREFIX + state.config); return; }
+    state.processing = true;
+    const myGeneration = state.generation;
+    const myConfig = state.config;
     try {
       setStatus(`Loading ${myConfig}…`, true);
       const converter = await getConverter(myConfig);
-      if (!enabled || generation !== myGeneration || config !== myConfig) return;
+      if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) return;
 
-      while (enabled && generation === myGeneration && config === myConfig && queue.length) {
+      while (state.enabled && state.generation === myGeneration && state.config === myConfig && state.queue.length) {
         const chunk = [];
-        while (queue.length && chunk.length < CHUNK_SIZE) {
-          const node = queue.shift();
-          queuedNodes.delete(node);
+        while (state.queue.length && chunk.length < CHUNK_SIZE) {
+          const node = state.queue.shift();
+          state.queuedNodes.delete(node);
           if (!node.isConnected || !shouldProcessTextNode(node)) continue;
-          const state = getNodeState(node) || rememberOriginal(node, false);
-          if (!state.original || !HAS_HAN.test(state.original)) continue;
-          if (state.convertedConfig === myConfig && node.nodeValue === state.convertedText) continue;
-          chunk.push({ node, state, version: state.version, original: state.original });
+          const ns = getNodeState(node) || rememberOriginal(node, false);
+          if (!ns.original || !HAS_HAN.test(ns.original)) continue;
+          if (ns.convertedConfig === myConfig && node.nodeValue === ns.convertedText) continue;
+          chunk.push({ node, state: ns, version: ns.version, original: ns.original });
         }
         if (!chunk.length) { await yieldToBrowser(); continue; }
 
-        setStatus(`Converting… ${queue.length} left`, true);
+        setStatus(`Converting… ${state.queue.length} left`, true);
         const converted = [];
         for (const item of chunk) {
-          if (!enabled || generation !== myGeneration || config !== myConfig) break;
+          if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
           let result;
           try {
             result = await converter(item.original);
-            converterErrorCount = 0;
+            state.converterErrorCount = 0;
           } catch (err) {
-            converterErrorCount++;
+            state.converterErrorCount++;
             console.error("[OpenCC-WASM userscript] Conversion failed:", err);
-            if (converterErrorCount >= MAX_CONVERTER_ERRORS) {
+            if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
               setStatus("Conversion failed", false, true);
               return;
             }
-            await new Promise(resolve => setTimeout(resolve, 200 * converterErrorCount));
+            await new Promise(resolve => setTimeout(resolve, 200 * state.converterErrorCount));
             continue;
           }
           converted.push({ item, result });
         }
 
-        if (!enabled || generation !== myGeneration || config !== myConfig) break;
+        if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
 
-        writingBack = true;
+        state.writingBack = true;
         stopObserving(false);
         try {
           for (const { item, result } of converted) {
-            if (!enabled || generation !== myGeneration || config !== myConfig) break;
+            if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
             const currentState = getNodeState(item.node);
             if (currentState !== item.state || item.state.version !== item.version) continue;
             if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
@@ -358,24 +334,25 @@
             item.state.convertedText = convertedText;
           }
         } finally {
-          writingBack = false;
-          if (enabled) startObserving();
+          state.writingBack = false;
+          if (state.enabled) startObserving();
         }
         await yieldToBrowser();
       }
 
-      if (enabled && generation === myGeneration && config === myConfig) setStatus(STATUS_ON_PREFIX + myConfig);
+      if (state.enabled && state.generation === myGeneration && state.config === myConfig)
+        setStatus(STATUS_ON_PREFIX + myConfig);
     } catch (err) {
       console.error("[OpenCC-WASM userscript] OpenCC load/process error:", err);
       setStatus("OpenCC error", false, true);
     } finally {
-      processing = false;
-      if (enabled && queue.length) scheduleProcess(0);
+      state.processing = false;
+      if (state.enabled && state.queue.length) scheduleProcess(0);
     }
   }
 
   function handleMutations(mutations) {
-    if (!enabled || writingBack) return;
+    if (!state.enabled || state.writingBack) return;
     let enqueued = 0;
     let sawRemovedNodes = false;
     for (const mutation of mutations) {
@@ -396,66 +373,58 @@
   }
 
   function startObserving() {
-    if (observing || !enabled || !document.body) return;
+    if (state.observing || !state.enabled || !document.body) return;
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-    observing = true;
+    state.observing = true;
   }
 
   function stopObserving(processPending = false) {
-    if (!observing) return;
-    observer.disconnect();
-    observing = false;
+    if (!state.observing) return;
     if (processPending) { const pending = observer.takeRecords(); if (pending.length) handleMutations(pending); }
+    observer.disconnect();
+    state.observing = false;
   }
 
   function schedulePrune() {
-    if (pruneTimer) return;
-    pruneTimer = setTimeout(() => {
-      pruneTimer = 0;
-      for (const [key, entry] of nodeEntries) {
-        const node = entry.ref.deref();
-        if (!node || !node.isConnected) nodeEntries.delete(key);
-      }
+    if (state.pruneTimer) return;
+    state.pruneTimer = setTimeout(() => {
+      state.pruneTimer = 0;
     }, PRUNE_DELAY_MS);
   }
 
   function clearScheduledTimers() {
-    if (processTimer)  { clearTimeout(processTimer);  processTimer  = 0; }
-    if (fullScanTimer) { clearTimeout(fullScanTimer); fullScanTimer = 0; }
-    if (pruneTimer)    { clearTimeout(pruneTimer);    pruneTimer    = 0; }
+    if (state.processTimer)  { clearTimeout(state.processTimer);  state.processTimer  = 0; }
+    if (state.fullScanTimer) { clearTimeout(state.fullScanTimer); state.fullScanTimer = 0; }
+    if (state.pruneTimer)    { clearTimeout(state.pruneTimer);    state.pruneTimer    = 0; }
   }
 
   function restoreOriginals() {
     clearScheduledTimers();
     stopObserving(false);
-    for (const [, entry] of nodeEntries) {
-      const node = entry.ref.deref();
-      if (node && node.isConnected && node.nodeValue !== entry.state.original) {
-        node.nodeValue = entry.state.original;
-      }
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      const ns = nodeStates.get(node);
+      if (ns && node.isConnected && node.nodeValue !== ns.original) node.nodeValue = ns.original;
     }
-    nodeEntries.clear();
     clearQueue();
   }
 
   function setEnabled(nextEnabled) {
     nextEnabled = Boolean(nextEnabled);
-    if (nextEnabled === enabled) {
-      refreshControls();
-      return;
-    }
-    generation++;
+    if (nextEnabled === state.enabled) { refreshControls(); return; }
+    state.generation++;
     clearScheduledTimers();
     if (!nextEnabled) {
       stopObserving(false);
-      enabled = false;
-      storeSet("enabled", enabled);
+      state.enabled = false;
+      storeSet("enabled", false);
       restoreOriginals();
       setStatus("Off");
     } else {
-      enabled = true;
-      storeSet("enabled", enabled);
-      setStatus(STATUS_ON_PREFIX + config, true);
+      state.enabled = true;
+      storeSet("enabled", true);
+      setStatus(STATUS_ON_PREFIX + state.config, true);
       startObserving();
       scheduleFullScan(0);
     }
@@ -463,18 +432,19 @@
   }
 
   function setConfig(nextConfig) {
-    if (!CONFIG_VALUES.has(nextConfig) || nextConfig === config) { refreshControls(); return; }
-    config = nextConfig;
-    storeSet("config", config);
-    generation++;
+    if (!CONFIG_VALUES.has(nextConfig)) return;
+    if (nextConfig === state.config) { refreshControls(); return; }
+    state.config = nextConfig;
+    storeSet("config", state.config);
+    state.generation++;
     clearQueue();
     refreshControls();
-    if (enabled) { setStatus(`Switching to ${config}…`, true); scheduleFullScan(0); }
+    if (state.enabled) { setStatus(`Switching to ${state.config}…`, true); scheduleFullScan(0); }
     else setStatus("Off");
   }
 
   function findGroupForConfig(val) {
-    return CONFIG_INDEX.get(val) ?? CONFIG_GROUPS[0].id;
+    return CONFIG_INDEX.get(val);
   }
 
   function createPanel() {
@@ -486,125 +456,114 @@
     const root = host.attachShadow({ mode: "open" });
 
     const style = document.createElement("style");
-    style.textContent = [
-      `:host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(10,10,18,.88);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.09);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a}`,
-      `*{box-sizing:border-box;margin:0;padding:0}`,
-      `@keyframes dotBlink{0%,100%{opacity:1}50%{opacity:.3}}`,
-      `@keyframes panelIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}`,
-      `@keyframes panelOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(8px)}}`,
-      `.fab{position:absolute;right:0;bottom:0;width:52px;height:52px;z-index:2;border-radius:16px;border:1px solid var(--border-strong);background:var(--bg);backdrop-filter:blur(24px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform .18s ease,box-shadow .2s ease;box-shadow:0 8px 32px rgba(0,0,0,.5)}`,
-      `.fab:hover{transform:scale(1.08) translateY(-2px)}`,
-      `.fab:active{transform:scale(.95)}`,
-      `.fab[hidden]{display:none!important}`,
-      `.fab.busy{box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 2px var(--warning)}`,
-      `.fab-inner{font-size:18px;line-height:1;color:var(--text-1);font-weight:700}`,
-      `.fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border-radius:50%;border:1.5px solid rgba(10,10,18,.9);background:var(--text-3);transition:background .3s ease}`,
-      `.fab-dot.on{background:var(--success)}`,
-      `.fab-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}`,
-      `.fab-dot.error{background:var(--danger)}`,
-      `.panel{position:absolute;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 24px 64px rgba(0,0,0,.6);overflow:hidden;animation:panelIn .2s ease}`,
-      `.panel[hidden]{display:none!important}`,
-      `.panel.collapsing{animation:panelOut .18s ease forwards;pointer-events:none}`,
-      `.header{display:flex;align-items:center;gap:8px;padding:11px 14px 10px;cursor:grab;user-select:none;-webkit-user-select:none;border-bottom:1px solid var(--border)}`,
-      `.header:active{cursor:grabbing}`,
-      `.header-dot{width:7px;height:7px;border-radius:50%;background:var(--text-3);flex-shrink:0;transition:background .3s}`,
-      `.header-dot.on{background:var(--success)}`,
-      `.header-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}`,
-      `.header-dot.error{background:var(--danger)}`,
-      `.header-label{font-size:13px;font-weight:700;color:var(--text-2);letter-spacing:.08em;text-transform:uppercase;flex-shrink:0}`,
-      `.header-status{flex:1;font-size:12px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:ui-monospace,"SF Mono",monospace;transition:color .3s}`,
-      `.header-status.busy{color:var(--warning)}`,
-      `.header-status.error{color:var(--danger)}`,
-      `.body{padding:10px 0 12px;display:flex;height:200px}`,
-      `.body-left{width:78px;flex-shrink:0;display:flex;flex-direction:column;padding:0 8px;gap:4px;border-right:1px solid var(--border)}`,
-      `.categories{display:flex;flex-direction:column;gap:4px;flex:1}`,
-      `.cat-btn{flex:1;border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--text-3);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1.25;text-align:center}`,
-      `.cat-btn:hover{border-color:var(--border-strong);color:var(--text-2);background:var(--bg-card)}`,
-      `.cat-btn.active{color:#fff;border-color:transparent;background:var(--cat-color,var(--primary))}`,
-      `.body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}`,
-      `.config-list{flex:1;overflow-y:scroll;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}`,
-      `@keyframes listFade{from{opacity:0}to{opacity:1}}`,
-      `.config-list.switching{animation:listFade .15s ease}`,
-      `.config-list::-webkit-scrollbar{width:3px}`,
-      `.config-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}`,
-      `.config-item{display:flex;align-items:flex-start;gap:7px;padding:5px 8px;border-radius:7px;cursor:pointer;transition:background .12s;border:1px solid transparent}`,
-      `.config-item:hover{background:var(--bg-card);border-color:var(--border)}`,
-      `.config-item.selected{background:rgba(124,106,247,.1);border-color:rgba(124,106,247,.25)}`,
-      `.config-radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--text-3);flex-shrink:0;margin-top:2px;display:flex;align-items:center;justify-content:center;transition:border-color .15s}`,
-      `.config-item.selected .config-radio{border-color:var(--primary)}`,
-      `.config-radio::after{content:"";width:5px;height:5px;border-radius:50%;background:var(--primary);opacity:0;transition:opacity .15s}`,
-      `.config-item.selected .config-radio::after{opacity:1}`,
-      `.config-label{font-size:13px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}`,
-      `.config-item.selected .config-label{color:var(--text-1)}`,
-      `.btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s;display:flex;align-items:center;justify-content:center}`,
-      `.btn:hover{opacity:.85}`,
-      `.btn:active{transform:scale(.97)}`,
-      `.btn-primary{background:linear-gradient(135deg,#6d5af0,#9b6fff);border-color:rgba(150,120,255,.25);color:#fff}`,
-      `.btn-danger{background:linear-gradient(135deg,#e8415a,#f07);border-color:rgba(240,80,100,.25);color:#fff}`,
-      `.footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}`,
-      `.footer-version{font-size:11px;color:var(--text-3);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}`,
-      `.footer-hint{font-size:10px;color:var(--text-3);opacity:.5}`,
-    ].join("\n");
+    style.textContent = `
+:host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(10,10,18,.88);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.09);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a}
+*{box-sizing:border-box;margin:0;padding:0}
+@keyframes dotBlink{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes panelIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes panelOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(8px)}}
+.fab{position:absolute;right:0;bottom:0;width:52px;height:52px;z-index:2;border-radius:16px;border:1px solid var(--border-strong);background:var(--bg);backdrop-filter:blur(24px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform .18s ease,box-shadow .2s ease;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+.fab:hover{transform:scale(1.08) translateY(-2px)}
+.fab:active{transform:scale(.95)}
+.fab[hidden]{display:none!important}
+.fab.busy{box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 2px var(--warning)}
+.fab-inner{font-size:18px;line-height:1;color:var(--text-1);font-weight:700}
+.fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border-radius:50%;border:1.5px solid rgba(10,10,18,.9);background:var(--text-3);transition:background .3s ease}
+.fab-dot.on{background:var(--success)}
+.fab-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}
+.fab-dot.error{background:var(--danger)}
+.panel{position:absolute;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 24px 64px rgba(0,0,0,.6);overflow:hidden;animation:panelIn .2s ease}
+.panel[hidden]{display:none!important}
+.panel.collapsing{animation:panelOut .18s ease forwards;pointer-events:none}
+.header{display:flex;align-items:center;gap:8px;padding:11px 14px 10px;cursor:grab;user-select:none;-webkit-user-select:none;border-bottom:1px solid var(--border)}
+.header:active{cursor:grabbing}
+.header-dot{width:7px;height:7px;border-radius:50%;background:var(--text-3);flex-shrink:0;transition:background .3s}
+.header-dot.on{background:var(--success)}
+.header-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}
+.header-dot.error{background:var(--danger)}
+.header-label{font-size:13px;font-weight:700;color:var(--text-2);letter-spacing:.08em;text-transform:uppercase;flex-shrink:0}
+.header-status{flex:1;font-size:12px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:ui-monospace,"SF Mono",monospace;transition:color .3s}
+.header-status.busy{color:var(--warning)}
+.header-status.error{color:var(--danger)}
+.body{padding:10px 0 12px;display:flex;height:200px}
+.body-left{width:78px;flex-shrink:0;display:flex;flex-direction:column;padding:0 8px;gap:4px;border-right:1px solid var(--border)}
+.categories{display:flex;flex-direction:column;gap:4px;flex:1}
+.cat-btn{flex:1;border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--text-3);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1.25;text-align:center}
+.cat-btn:hover{border-color:var(--border-strong);color:var(--text-2);background:var(--bg-card)}
+.cat-btn.active{color:#fff;border-color:transparent;background:var(--cat-color,var(--primary))}
+.body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}
+.config-list{flex:1;overflow-y:scroll;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+@keyframes listFade{from{opacity:0}to{opacity:1}}
+.config-list.switching{animation:listFade .15s ease}
+.config-list::-webkit-scrollbar{width:3px}
+.config-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.config-item{display:flex;align-items:flex-start;gap:7px;padding:5px 8px;border-radius:7px;cursor:pointer;transition:background .12s;border:1px solid transparent}
+.config-item:hover{background:var(--bg-card);border-color:var(--border)}
+.config-item.selected{background:rgba(124,106,247,.1);border-color:rgba(124,106,247,.25)}
+.config-radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--text-3);flex-shrink:0;margin-top:2px;display:flex;align-items:center;justify-content:center;transition:border-color .15s}
+.config-item.selected .config-radio{border-color:var(--primary)}
+.config-radio::after{content:"";width:5px;height:5px;border-radius:50%;background:var(--primary);opacity:0;transition:opacity .15s}
+.config-item.selected .config-radio::after{opacity:1}
+.config-label{font-size:13px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}
+.config-item.selected .config-label{color:var(--text-1)}
+.btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s;display:flex;align-items:center;justify-content:center}
+.btn:hover{opacity:.85}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:linear-gradient(135deg,#6d5af0,#9b6fff);border-color:rgba(150,120,255,.25);color:#fff}
+.btn-danger{background:linear-gradient(135deg,#e8415a,#f07);border-color:rgba(240,80,100,.25);color:#fff}
+.footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.footer-version{font-size:11px;color:var(--text-3);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
+.footer-hint{font-size:10px;color:var(--text-3);opacity:.5}
+`;
 
     function el(tag, attrs = {}, ...children) {
       const node = document.createElement(tag);
       for (const [k, v] of Object.entries(attrs)) {
         if (k === "className") node.className = v;
+        else if (k === "id") node.id = v;
+        else if (k === "hidden") node.hidden = v;
         else node.setAttribute(k, v);
       }
-      for (const child of children) node.appendChild(child);
+      for (const child of children) {
+        node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+      }
       return node;
     }
-    function txt(content) { return document.createTextNode(content); }
 
-    const fabDot    = el("div",  { id: "fabDot",    className: "fab-dot" });
-    const fabInner  = el("div",  { className: "fab-inner" }, txt("文"));
-    const fab       = el("div",  { id: "fab", className: "fab", title: "OpenCC-WASM — 拖拽移动" },
-                       fabInner, fabDot);
+    const fabDot   = el("div",  { className: "fab-dot" });
+    const fab      = el("div",  { className: "fab", title: "OpenCC-WASM — 拖拽移动" },
+                       el("div", { className: "fab-inner" }, "文"), fabDot);
 
-    const headerDot    = el("div",  { id: "headerDot", className: "header-dot" });
-    const headerLabel  = el("span", { className: "header-label" }, txt("OpenCC"));
-    const statusEl     = el("div",  { id: "status",    className: "header-status" });
-    const header       = el("div",  { id: "header",    className: "header" },
-                           headerDot, headerLabel, statusEl);
+    const headerDot = el("div",  { className: "header-dot" });
+    const statusEl  = el("div",  { className: "header-status" });
+    const header    = el("div",  { className: "header" },
+                       headerDot, el("span", { className: "header-label" }, "OpenCC"), statusEl);
 
-    const categoriesEl = el("div", { id: "categories", className: "categories" });
-    const bodyLeft     = el("div", { className: "body-left" },
-                           el("div", { className: "body-left" }, categoriesEl));
-
-    const configList = el("div",    { id: "configList", className: "config-list" });
-    const toggle     = el("button", { id: "toggle",     className: "btn" });
-    const bodyRight  = el("div",    { className: "body-right" }, configList, toggle);
-
-    const bodyEl = el("div", { id: "body", className: "body" },
+    const categoriesEl = el("div", { className: "categories" });
+    const configList   = el("div", { className: "config-list" });
+    const toggle       = el("button", { className: "btn" });
+    const bodyEl       = el("div", { className: "body" },
       el("div", { className: "body-left" }, categoriesEl),
-      bodyRight,
+      el("div", { className: "body-right" }, configList, toggle),
     );
 
-    const footerVersion = el("span", { className: "footer-version" }, txt("opencc-wasm 0.8.2"));
-    const footerHint    = el("span", { className: "footer-hint" },    txt("拖拽移动"));
-    const footer        = el("div",  { className: "footer" }, footerVersion, footerHint);
+    const footer = el("div", { className: "footer" },
+      el("span", { className: "footer-version" }, "opencc-wasm 0.8.2"),
+      el("span", { className: "footer-hint" }, "拖拽移动"),
+    );
 
-    const panel = el("div", { id: "panel", className: "panel" }, header, bodyEl, footer);
+    const panel = el("div", { className: "panel" }, header, bodyEl, footer);
     panel.hidden = true;
 
     root.appendChild(style);
     root.appendChild(fab);
     root.appendChild(panel);
 
-    ui = {
-      host, root,
-      status:     statusEl,
-      configList,
-      categories: categoriesEl,
-      toggle,
-      body:       bodyEl,
-      fab,
-      panel,
-      fabDot,
-      headerDot,
-      header,
-      activeCategory: findGroupForConfig(config),
+    state.ui = {
+      host, root, status: statusEl, configList,
+      categories: categoriesEl, toggle, fab, panel,
+      fabDot, headerDot, header,
+      activeCategory: findGroupForConfig(state.config),
     };
 
     for (const group of CONFIG_GROUPS) {
@@ -613,43 +572,43 @@
       btn.dataset.cat = group.id;
       btn.textContent = group.label;
       btn.style.setProperty("--cat-color", group.color);
-      btn.addEventListener("click", () => { ui.activeCategory = group.id; populateConfigList(); updateCategoryTabs(); });
-      ui.categories.appendChild(btn);
+      btn.addEventListener("click", () => {
+        state.ui.activeCategory = group.id;
+        populateConfigList();
+        updateCategoryTabs();
+      });
+      state.ui.categories.appendChild(btn);
     }
 
     populateConfigList();
     updateCategoryTabs();
 
-    ui.toggle.addEventListener("click", () => setEnabled(!enabled));
+    toggle.addEventListener("click", () => setEnabled(!state.enabled));
 
-    if (!outsideClickBound) {
-      outsideClickBound = true;
-      const onOutsideClick = (e) => {
-        if (collapsed) return;
-        if (!ui || !ui.host) return;
-        if (!ui.host.contains(e.target) && !ui.host.shadowRoot.contains(e.composedPath()[0])) {
-          collapsed = true;
-          storeSet("collapsed", collapsed);
-          refreshControls();
-        }
-      };
-      document.addEventListener("mousedown", onOutsideClick, { capture: false });
-    }
+    document.addEventListener("mousedown", (e) => {
+      if (state.collapsed) return;
+      if (!state.ui || !state.ui.host) return;
+      if (!state.ui.host.contains(e.target) && !state.ui.host.shadowRoot.contains(e.composedPath()[0])) {
+        state.collapsed = true;
+        storeSet("collapsed", state.collapsed);
+        refreshControls();
+      }
+    }, { capture: false });
 
     setupDrag();
     refreshControls();
-    setStatus(latestStatus, latestBusy, latestError);
+    setStatus(state.status.text, state.status.busy, state.status.error);
   }
 
   function populateConfigList() {
-    const group = CONFIG_GROUPS.find(g => g.id === ui.activeCategory) || CONFIG_GROUPS[0];
-    const list = ui.configList;
+    const group = CONFIG_GROUPS.find(g => g.id === state.ui.activeCategory) || CONFIG_GROUPS[0];
+    const list = state.ui.configList;
     list.innerHTML = "";
     list.classList.add("switching");
     list.getAnimations().forEach(a => { a.cancel(); a.play(); });
     for (const [value, label] of group.configs) {
       const item = document.createElement("div");
-      item.className = "config-item" + (value === config ? " selected" : "");
+      item.className = "config-item" + (value === state.config ? " selected" : "");
       item.dataset.value = value;
       const radio = document.createElement("div"); radio.className = "config-radio";
       const labelEl = document.createElement("div"); labelEl.className = "config-label"; labelEl.textContent = label;
@@ -660,13 +619,13 @@
   }
 
   function updateConfigListSelection() {
-    for (const item of ui.configList.querySelectorAll(".config-item"))
-      item.classList.toggle("selected", item.dataset.value === config);
+    for (const item of state.ui.configList.querySelectorAll(".config-item"))
+      item.classList.toggle("selected", item.dataset.value === state.config);
   }
 
   function updateCategoryTabs() {
-    for (const btn of ui.categories.querySelectorAll(".cat-btn")) {
-      const isActive = btn.dataset.cat === ui.activeCategory;
+    for (const btn of state.ui.categories.querySelectorAll(".cat-btn")) {
+      const isActive = btn.dataset.cat === state.ui.activeCategory;
       btn.classList.toggle("active", isActive);
       const group = CONFIG_GROUPS.find(g => g.id === btn.dataset.cat);
       btn.style.background = isActive && group ? group.color : "";
@@ -674,83 +633,81 @@
   }
 
   function refreshControls() {
-    if (!ui) return;
-    const catId = findGroupForConfig(config);
-    if (ui.activeCategory !== catId) { ui.activeCategory = catId; populateConfigList(); }
+    if (!state.ui) return;
+    const catId = findGroupForConfig(state.config);
+    if (state.ui.activeCategory !== catId) { state.ui.activeCategory = catId; populateConfigList(); }
     else updateConfigListSelection();
     updateCategoryTabs();
 
-    if (collapsed) {
-      if (!ui.panel.hidden && !collapsing) {
-        collapsing = true;
-        ui.panel.classList.add("collapsing");
-        ui.panel.addEventListener("animationend", function onEnd() {
-          ui.panel.removeEventListener("animationend", onEnd);
-          ui.panel.classList.remove("collapsing");
-          ui.panel.hidden = true;
-          ui.fab.hidden = false;
-          collapsing = false;
+    if (state.collapsed) {
+      if (!state.ui.panel.hidden && !state.collapsing) {
+        state.collapsing = true;
+        state.ui.panel.classList.add("collapsing");
+        state.ui.panel.addEventListener("animationend", function onEnd() {
+          state.ui.panel.removeEventListener("animationend", onEnd);
+          state.ui.panel.classList.remove("collapsing");
+          state.ui.panel.hidden = true;
+          state.ui.fab.hidden = false;
+          state.collapsing = false;
         }, { once: true });
-      } else if (!collapsing) {
-        ui.panel.hidden = true;
-        ui.fab.hidden = false;
+      } else if (!state.collapsing) {
+        state.ui.panel.hidden = true;
+        state.ui.fab.hidden = false;
       }
     } else {
-      ui.fab.hidden = true;
-      ui.panel.hidden = false;
-      ui.panel.classList.remove("collapsing");
-      collapsing = false;
+      state.ui.fab.hidden = true;
+      state.ui.panel.hidden = false;
+      state.ui.panel.classList.remove("collapsing");
+      state.collapsing = false;
     }
 
-    ui.toggle.textContent = enabled ? "关" : "开";
-    ui.toggle.className = "btn " + (enabled ? "btn-danger" : "btn-primary");
+    state.ui.toggle.textContent = state.enabled ? "关" : "开";
+    state.ui.toggle.className = "btn " + (state.enabled ? "btn-danger" : "btn-primary");
     updateStatusDots();
   }
 
   function updateStatusDots() {
-    if (!ui) return;
-    const stateClass = latestError ? "error" : latestBusy ? "busy" : enabled ? "on" : "";
-    ui.fabDot.className = "fab-dot " + stateClass;
-    ui.headerDot.className = "header-dot " + stateClass;
-    ui.fab.classList.toggle("busy", latestBusy);
+    if (!state.ui) return;
+    const { error, busy } = state.status;
+    const stateClass = error ? "error" : busy ? "busy" : state.enabled ? "on" : "";
+    state.ui.fabDot.className = "fab-dot " + stateClass;
+    state.ui.headerDot.className = "header-dot " + stateClass;
+    state.ui.fab.classList.toggle("busy", busy);
   }
 
   function setStatus(text, busy = false, error = false) {
-    latestStatus = text;
-    latestBusy = busy;
-    latestError = error;
-    if (!ui || !ui.status) return;
-    ui.status.textContent = text;
-    ui.status.classList.toggle("busy", busy);
-    ui.status.classList.toggle("error", error);
+    state.status = { text, busy, error };
+    if (!state.ui || !state.ui.status) return;
+    state.ui.status.textContent = text;
+    state.ui.status.classList.toggle("busy", busy);
+    state.ui.status.classList.toggle("error", error);
     updateStatusDots();
   }
 
   function setupDrag() {
-    if (!ui) return;
+    if (!state.ui) return;
     let startX, startY, startLeft, startTop, moved = false;
     const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
     if (savedPos && typeof savedPos.left === "number") applyPosition(savedPos.left, savedPos.top);
 
     function applyPosition(left, top) {
-      const { offsetWidth: hostW, offsetHeight: hostH } = ui.host;
+      const { offsetWidth: hostW, offsetHeight: hostH } = state.ui.host;
       const maxL = window.innerWidth  - hostW;
       const maxT = window.innerHeight - hostH;
-      ui.host.style.right  = "auto";
-      ui.host.style.bottom = "auto";
-      ui.host.style.left   = Math.max(0, Math.min(left, maxL)) + "px";
-      ui.host.style.top    = Math.max(0, Math.min(top,  maxT)) + "px";
+      state.ui.host.style.right  = "auto";
+      state.ui.host.style.bottom = "auto";
+      state.ui.host.style.left   = Math.max(0, Math.min(left, maxL)) + "px";
+      state.ui.host.style.top    = Math.max(0, Math.min(top,  maxT)) + "px";
     }
 
     function updatePanelDirection() {
-      const rect = ui.host.getBoundingClientRect();
-      const vw   = window.innerWidth;
-      const vh   = window.innerHeight;
-
-      const panel    = ui.panel;
-      const panelW   = panel.offsetWidth  || 280;
-      const panelH   = panel.offsetHeight || 275;
+      const rect   = state.ui.host.getBoundingClientRect();
+      const vw     = window.innerWidth;
+      const vh     = window.innerHeight;
+      const panel  = state.ui.panel;
+      const panelW = panel.offsetWidth  || 280;
+      const panelH = panel.offsetHeight || 275;
 
       const spaceRight  = vw - rect.right;
       const spaceLeft   = rect.left;
@@ -778,18 +735,18 @@
       panel.style.transformOrigin = vert + " " + horiz;
     }
 
-    function syncDirection() { if (!collapsed) updatePanelDirection(); }
+    function syncDirection() { if (!state.collapsed) updatePanelDirection(); }
 
-    window.addEventListener("resize", () => {
-      const rect = ui.host.getBoundingClientRect();
+    window.addEventListener("resize", () => requestAnimationFrame(() => {
+      const rect = state.ui.host.getBoundingClientRect();
       applyPosition(rect.left, rect.top);
       syncDirection();
-    });
+    }));
 
     function startDrag(clientX, clientY) {
       moved = false;
       startX = clientX; startY = clientY;
-      const rect = ui.host.getBoundingClientRect();
+      const rect = state.ui.host.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
       applyPosition(startLeft, startTop);
     }
@@ -803,14 +760,14 @@
 
     function onUpLogic() {
       if (moved) {
-        const rect = ui.host.getBoundingClientRect();
+        const rect = state.ui.host.getBoundingClientRect();
         storeSet("panelPos", { left: rect.left, top: rect.top });
         syncDirection();
       } else {
-        collapsed = !collapsed;
-        storeSet("collapsed", collapsed);
+        state.collapsed = !state.collapsed;
+        storeSet("collapsed", state.collapsed);
         refreshControls();
-        if (!collapsed) requestAnimationFrame(updatePanelDirection);
+        if (!state.collapsed) requestAnimationFrame(updatePanelDirection);
       }
     }
 
@@ -850,10 +807,10 @@
 
     requestAnimationFrame(updatePanelDirection);
 
-    ui.fab.addEventListener("mousedown", startMouseDrag);
-    ui.header.addEventListener("mousedown", startMouseDrag);
-    ui.fab.addEventListener("touchstart", startTouchDrag, { passive: true });
-    ui.header.addEventListener("touchstart", startTouchDrag, { passive: true });
+    state.ui.fab.addEventListener("mousedown", startMouseDrag);
+    state.ui.header.addEventListener("mousedown", startMouseDrag);
+    state.ui.fab.addEventListener("touchstart", startTouchDrag, { passive: true });
+    state.ui.header.addEventListener("touchstart", startTouchDrag, { passive: true });
   }
 
 })();
