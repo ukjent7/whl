@@ -31,39 +31,39 @@
 
   const CONFIG_GROUPS = [
     { id: "s2t", label: "简→繁", color: "#f59e0b", configs: [
-      ["s2twp",        "s2twp — 简体 → 台湾繁体 + 词汇"],
-      ["s2twp_jieba",  "s2twp_jieba — 简体 → 台湾繁体 + 词汇 (结巴)"],
-      ["s2tw",         "s2tw — 简体 → 台湾繁体"],
-      ["s2hk",         "s2hk — 简体 → 香港繁体"],
-      ["s2t",          "s2t — 简体 → 繁体"],
+      ["s2twp", "s2twp — 简体 → 台湾繁体 + 词汇"],
+      ["s2twp_jieba", "s2twp_jieba — 简体 → 台湾繁体 + 词汇 (结巴)"],
+      ["s2tw", "s2tw — 简体 → 台湾繁体"],
+      ["s2hk", "s2hk — 简体 → 香港繁体"],
+      ["s2t", "s2t — 简体 → 繁体"],
     ]},
     { id: "t2s", label: "繁→简", color: "#10b981", configs: [
-      ["tw2s",         "tw2s — 台湾繁体 → 简体"],
-      ["tw2sp",        "tw2sp — 台湾繁体 → 简体 + 词汇"],
-      ["tw2sp_jieba",  "tw2sp_jieba — 台湾繁体 → 简体 + 词汇 (结巴)"],
-      ["hk2s",         "hk2s — 香港繁体 → 简体"],
-      ["t2s",          "t2s — 繁体 → 简体"],
+      ["tw2s", "tw2s — 台湾繁体 → 简体"],
+      ["tw2sp", "tw2sp — 台湾繁体 → 简体 + 词汇"],
+      ["tw2sp_jieba", "tw2sp_jieba — 台湾繁体 → 简体 + 词汇 (结巴)"],
+      ["hk2s", "hk2s — 香港繁体 → 简体"],
+      ["t2s", "t2s — 繁体 → 简体"],
     ]},
     { id: "tw2hk", label: "繁→繁", color: "#8b5cf6", configs: [
-      ["hk2t",  "hk2t — 香港繁体 → 繁体"],
-      ["t2hk",  "t2hk — 繁体 → 香港繁体"],
-      ["tw2t",  "tw2t — 台湾繁体 → 繁体"],
-      ["t2tw",  "t2tw — 繁体 → 台湾繁体"],
+      ["hk2t", "hk2t — 香港繁体 → 繁体"],
+      ["t2hk", "t2hk — 繁体 → 香港繁体"],
+      ["tw2t", "tw2t — 台湾繁体 → 繁体"],
+      ["t2tw", "t2tw — 繁体 → 台湾繁体"],
     ]},
     { id: "jp", label: "日文", color: "#ec4899", configs: [
       ["jp2t", "jp2t — 新字体 → 旧字体"],
       ["t2jp", "t2jp — 旧字体 → 新字体"],
     ]},
     { id: "cngov", label: "国标", color: "#6366f1", configs: [
-      ["t2cngov",                "t2cngov — 国标繁体"],
-      ["t2cngov_keep_simp",      "t2cngov_keep_simp — 国标繁体 (保留简体)"],
-      ["t2cngov_jieba",          "t2cngov_jieba — 国标繁体 (结巴)"],
+      ["t2cngov", "t2cngov — 国标繁体"],
+      ["t2cngov_keep_simp", "t2cngov_keep_simp — 国标繁体 (保留简体)"],
+      ["t2cngov_jieba", "t2cngov_jieba — 国标繁体 (结巴)"],
       ["t2cngov_keep_simp_jieba","t2cngov_keep_simp_jieba — 国标繁体 (保留简体, 结巴)"],
     ]},
   ];
 
   const CONFIG_VALUES = new Set(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => v)));
-  const CONFIG_INDEX  = new Map(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => [v, g.id])));
+  const CONFIG_INDEX = new Map(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => [v, g.id])));
 
   const SKIP_SELECTOR = [
     `#${PANEL_ID}`, "[data-opencc-ignore]", "script", "style", "noscript", "template",
@@ -392,7 +392,7 @@
   }
 
   function clearScheduledTimers() {
-    if (state.processTimer)  { clearTimeout(state.processTimer);  state.processTimer  = 0; }
+    if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
     if (state.fullScanTimer) { clearTimeout(state.fullScanTimer); state.fullScanTimer = 0; }
   }
 
@@ -537,19 +537,19 @@
       return node;
     }
 
-    const fabDot   = el("div",  { className: "fab-dot" });
-    const fab      = el("div",  { className: "fab", title: "OpenCC-WASM — 拖拽移动" },
+    const fabDot = el("div", { className: "fab-dot" });
+    const fab = el("div", { className: "fab", title: "OpenCC-WASM — 拖拽移动" },
                        el("div", { className: "fab-inner" }, "文"), fabDot);
 
-    const headerDot = el("div",  { className: "header-dot" });
-    const statusEl  = el("div",  { className: "header-status" });
-    const header    = el("div",  { className: "header" },
+    const headerDot = el("div", { className: "header-dot" });
+    const statusEl = el("div", { className: "header-status" });
+    const header = el("div", { className: "header" },
                        headerDot, el("span", { className: "header-label" }, "OpenCC"), statusEl);
 
     const categoriesEl = el("div", { className: "categories" });
-    const configList   = el("div", { className: "config-list" });
-    const toggle       = el("button", { className: "btn" });
-    const bodyEl       = el("div", { className: "body" },
+    const configList = el("div", { className: "config-list" });
+    const toggle = el("button", { className: "btn" });
+    const bodyEl = el("div", { className: "body" },
       el("div", { className: "body-left" }, categoriesEl),
       el("div", { className: "body-right" }, configList, toggle),
     );
@@ -703,39 +703,39 @@
 
     function applyPosition(left, top) {
       const { offsetWidth: hostW, offsetHeight: hostH } = state.ui.host;
-      const maxL = window.innerWidth  - hostW;
+      const maxL = window.innerWidth - hostW;
       const maxT = window.innerHeight - hostH;
-      state.ui.host.style.right  = "auto";
+      state.ui.host.style.right = "auto";
       state.ui.host.style.bottom = "auto";
-      state.ui.host.style.left   = Math.max(0, Math.min(left, maxL)) + "px";
-      state.ui.host.style.top    = Math.max(0, Math.min(top,  maxT)) + "px";
+      state.ui.host.style.left = Math.max(0, Math.min(left, maxL)) + "px";
+      state.ui.host.style.top = Math.max(0, Math.min(top, maxT)) + "px";
     }
 
     function updatePanelDirection() {
-      const rect   = state.ui.host.getBoundingClientRect();
-      const vw     = window.innerWidth;
-      const vh     = window.innerHeight;
-      const panel  = state.ui.panel;
-      const panelW = panel.offsetWidth  || 280;
+      const rect = state.ui.host.getBoundingClientRect();
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const panel = state.ui.panel;
+      const panelW = panel.offsetWidth || 280;
       const panelH = panel.offsetHeight || 275;
 
-      const spaceRight  = vw - rect.right;
-      const spaceLeft   = rect.left;
-      const spaceBelow  = vh - rect.bottom;
-      const spaceAbove  = rect.top;
+      const spaceRight = vw - rect.right;
+      const spaceLeft = rect.left;
+      const spaceBelow = vh - rect.bottom;
+      const spaceAbove = rect.top;
 
-      const anchorRight  = spaceRight >= panelW ? false
-                         : spaceLeft  >= panelW ? true
+      const anchorRight = spaceRight >= panelW ? false
+                         : spaceLeft >= panelW ? true
                          : spaceLeft > spaceRight;
 
       const anchorBottom = spaceAbove >= panelH ? true
                          : spaceBelow >= panelH ? false
                          : true;
 
-      panel.style.right  = anchorRight  ? "0" : "";
-      panel.style.left   = anchorRight  ? "" : "0";
+      panel.style.right = anchorRight ? "0" : "";
+      panel.style.left = anchorRight ? "" : "0";
       panel.style.bottom = anchorBottom ? "0" : "";
-      panel.style.top    = anchorBottom ? "" : "0";
+      panel.style.top = anchorBottom ? "" : "0";
       panel.style.transformOrigin = `${anchorBottom ? "bottom" : "top"} ${anchorRight ? "right" : "left"}`;
     }
 
