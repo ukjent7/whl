@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.7.0
+// @version      3.8.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -21,6 +21,7 @@
   const PROCESS_DEBOUNCE_MS = 80;
   const FULL_SCAN_DEBOUNCE_MS = 60;
   const MAX_CONVERTER_ERRORS = 5;
+  const CONVERTER_RETRY_BASE_MS = 200;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
   const STORE_PREFIX = "openccWasmUserscript.";
   const WARMUP_TEXT = "伺服器发现資訊只鸡";
@@ -69,6 +70,11 @@
 
   const HAS_HAN = /\p{Script=Han}/u;
 
+  // Prefer scheduler.yield (Chrome 115+) for cooperative scheduling; fall back to setTimeout.
+  const yieldToMain = typeof scheduler?.yield === "function"
+    ? () => scheduler.yield()
+    : () => new Promise(r => setTimeout(r, 0));
+
   const state = {
     config:              readConfig(),
     enabled:             storeGet("enabled", DEFAULT_ENABLED),
@@ -90,6 +96,9 @@
   state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
 
   const nodeStates = new WeakMap();
+  // LRU cache for converter promises — capped at 3 to bound WASM memory on pages
+  // where the user browses through many config options.
+  const CONVERTER_CACHE_MAX = 3;
   const converterPromises = new Map();
   const observer = new MutationObserver(handleMutations);
 
@@ -132,7 +141,13 @@
   }
 
   async function getConverter(configName) {
-    if (converterPromises.has(configName)) return converterPromises.get(configName);
+    if (converterPromises.has(configName)) {
+      // Refresh insertion order so this entry is "most recently used".
+      const cached = converterPromises.get(configName);
+      converterPromises.delete(configName);
+      converterPromises.set(configName, cached);
+      return cached;
+    }
     const promise = (async () => {
       try {
         const mod = await import(OPENCC_ESM_URL);
@@ -145,6 +160,11 @@
         throw err;
       }
     })();
+    // Evict the least-recently-used entry when the cache is full.
+    if (converterPromises.size >= CONVERTER_CACHE_MAX) {
+      const lruKey = converterPromises.keys().next().value;
+      converterPromises.delete(lruKey);
+    }
     converterPromises.set(configName, promise);
     return promise;
   }
@@ -268,7 +288,7 @@
           if (ns.convertedConfig === myConfig && node.nodeValue === ns.convertedText) continue;
           chunk.push({ node, state: ns, version: ns.version, original: ns.original });
         }
-        if (!chunk.length) { await scheduler.yield(); continue; }
+        if (!chunk.length) { await yieldToMain(); continue; }
 
         setStatus(`Converting… ${state.queue.length} left`, true);
         const converted = [];
@@ -285,7 +305,7 @@
               setStatus("Conversion failed", false, true);
               return;
             }
-            await new Promise(resolve => setTimeout(resolve, 200 * state.converterErrorCount));
+            await new Promise(resolve => setTimeout(resolve, CONVERTER_RETRY_BASE_MS * state.converterErrorCount));
             continue;
           }
           converted.push({ item, result });
@@ -310,7 +330,7 @@
           state.writingBack = false;
           if (state.enabled) startObserving();
         }
-        await scheduler.yield();
+        await yieldToMain();
       }
 
       if (state.enabled && state.generation === myGeneration && state.config === myConfig)
@@ -321,6 +341,7 @@
     } finally {
       state.processing = false;
       if (state.enabled && state.queue.length) scheduleProcess(0);
+      else if (!state.enabled) clearQueue();
     }
   }
 
@@ -363,9 +384,22 @@
   function restoreOriginals() {
     clearScheduledTimers();
     stopObserving(false);
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+      {
+        acceptNode(node) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_SKIP;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
     let node;
     while ((node = walker.nextNode())) {
+      if (node.nodeType !== Node.TEXT_NODE) continue;
       const ns = nodeStates.get(node);
       if (ns && node.isConnected && node.nodeValue !== ns.original) node.nodeValue = ns.original;
     }
@@ -539,7 +573,9 @@
 
     toggle.addEventListener("click", () => setEnabled(!state.enabled));
 
-    document.addEventListener("mousedown", (e) => {
+    // Use pointerup (not mousedown) so that click-outside-to-collapse does not
+    // fire while the user is merely selecting text on the page.
+    document.addEventListener("pointerup", (e) => {
       if (state.collapsed || !state.ui) return;
       if (!state.ui.host.shadowRoot.contains(e.composedPath()[0])) {
         state.collapsed = true;
@@ -558,7 +594,7 @@
     const list = state.ui.configList;
     list.innerHTML = "";
     list.classList.remove("switching");
-    void list.offsetWidth;
+    void list.offsetWidth; // Force a reflow so removing then re-adding the class restarts the CSS animation.
     list.classList.add("switching");
     for (const [value, label] of group.configs) {
       const item = document.createElement("div");
@@ -643,7 +679,9 @@
     let startX, startY, startLeft, startTop, moved = false;
     const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
-    if (savedPos && typeof savedPos.left === "number") applyPosition(savedPos.left, savedPos.top);
+    // Defer so the host element has been painted and offsetWidth/Height are valid before clamping.
+    if (savedPos && typeof savedPos.left === "number")
+      requestAnimationFrame(() => applyPosition(savedPos.left, savedPos.top));
 
     function applyPosition(left, top) {
       const { offsetWidth: hostW, offsetHeight: hostH } = state.ui.host;
