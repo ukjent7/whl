@@ -70,7 +70,6 @@
 
   const HAS_HAN = /\p{Script=Han}/u;
 
-  // Prefer scheduler.yield (Chrome 115+) for cooperative scheduling; fall back to setTimeout.
   const yieldToMain = typeof scheduler?.yield === "function"
     ? () => scheduler.yield()
     : () => new Promise(r => setTimeout(r, 0));
@@ -96,8 +95,6 @@
   state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
 
   const nodeStates = new WeakMap();
-  // LRU cache for converter promises — capped at 3 to bound WASM memory on pages
-  // where the user browses through many config options.
   const CONVERTER_CACHE_MAX = 3;
   const converterPromises = new Map();
   const observer = new MutationObserver(handleMutations);
@@ -142,7 +139,6 @@
 
   async function getConverter(configName) {
     if (converterPromises.has(configName)) {
-      // Refresh insertion order so this entry is "most recently used".
       const cached = converterPromises.get(configName);
       converterPromises.delete(configName);
       converterPromises.set(configName, cached);
@@ -160,7 +156,6 @@
         throw err;
       }
     })();
-    // Evict the least-recently-used entry when the cache is full.
     if (converterPromises.size >= CONVERTER_CACHE_MAX) {
       const lruKey = converterPromises.keys().next().value;
       converterPromises.delete(lruKey);
@@ -573,8 +568,6 @@
 
     toggle.addEventListener("click", () => setEnabled(!state.enabled));
 
-    // Use pointerup (not mousedown) so that click-outside-to-collapse does not
-    // fire while the user is merely selecting text on the page.
     document.addEventListener("pointerup", (e) => {
       if (state.collapsed || !state.ui) return;
       if (!state.ui.host.shadowRoot.contains(e.composedPath()[0])) {
@@ -679,7 +672,6 @@
     let startX, startY, startLeft, startTop, moved = false;
     const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
-    // Defer so the host element has been painted and offsetWidth/Height are valid before clamping.
     if (savedPos && typeof savedPos.left === "number")
       requestAnimationFrame(() => applyPosition(savedPos.left, savedPos.top));
 
