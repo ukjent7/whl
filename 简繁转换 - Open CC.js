@@ -108,8 +108,9 @@
 
   async function main() {
     if (document.contentType && !/html/i.test(document.contentType)) return;
-    if (document.readyState === "loading")
+    if (document.readyState === "loading"){
       await new Promise(resolve => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
+    }
     if (!document.body) return;
     createPanel();
     if (state.enabled) { startObserving(); scheduleFullScan(0); }
@@ -332,8 +333,9 @@
         await yieldToMain();
       }
 
-      if (state.enabled && state.generation === myGeneration && state.config === myConfig)
+      if (state.enabled && state.generation === myGeneration && state.config === myConfig){
         setStatus(STATUS_ON_PREFIX + myConfig);
+      }
     } catch (err) {
       console.error("[OpenCC-WASM userscript] OpenCC load/process error:", err);
       state.converterErrorCount = 0;
@@ -698,8 +700,9 @@
     let startX, startY, startLeft, startTop, moved = false;
     const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
-    if (savedPos && typeof savedPos.left === "number")
+    if (savedPos && typeof savedPos.left === "number"){
       requestAnimationFrame(() => applyPosition(savedPos.left, savedPos.top));
+    }
 
     function applyPosition(left, top) {
       const { offsetWidth: hostW, offsetHeight: hostH } = state.ui.host;
