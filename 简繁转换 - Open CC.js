@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      4.1.0
+// @version      4.2.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -21,14 +21,16 @@
   const CHUNK_SIZE = 300;
   const PROCESS_DEBOUNCE_MS = 80;
   const FULL_SCAN_DEBOUNCE_MS = 60;
+  const MIN_FULL_SCAN_DELAY_MS = 16;
   const MAX_CONVERTER_ERRORS = 5;
   const CONVERTER_RETRY_BASE_MS = 200;
   const MAX_MODULE_LOAD_ERRORS = 3;
   const MODULE_LOAD_RETRY_BASE_MS = 2000;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
   const STORE_PREFIX = "openccWasmUserscript.";
-  const WARMUP_TEXT = "伺服器发现資訊只鸡";
+  const WARMUP_TEXT = "伺服器发现資訊只鸡転変規範";
   const STATUS_ON_PREFIX = "On · ";
+  const INITIAL_NODE_VERSION = 1;
 
   const CONFIG_GROUPS = [
     { id: "s2t", label: "简→繁", color: "#f59e0b", configs: [
@@ -63,8 +65,10 @@
     ]},
   ];
 
-  const CONFIG_VALUES = new Set(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => v)));
-  const CONFIG_INDEX = new Map(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => [v, g.id])));
+  const CONFIG_VALUES = new Set();
+  const CONFIG_INDEX  = new Map();
+  for (const g of CONFIG_GROUPS)
+    for (const [v] of g.configs) { CONFIG_VALUES.add(v); CONFIG_INDEX.set(v, g.id); }
 
   const SKIP_SELECTOR = [
     `#${PANEL_ID}`, "[data-opencc-ignore]", "script", "style", "noscript", "template",
@@ -100,6 +104,7 @@
   const nodeStates = new WeakMap();
   let openccModulePromise = null;
   let openccModule = null;
+  const converterCache = new Map();
   const warmedConfigs = new Set();
   const observer = new MutationObserver(handleMutations);
 
@@ -149,15 +154,16 @@
         return openccModule;
       }).catch(err => {
         openccModulePromise = null;
+        openccModule = null;
         throw err;
       });
     }
     await openccModulePromise;
+    if (converterCache.has(configName)) return converterCache.get(configName);
     const converter = openccModule.Converter({ config: configName });
-    if (!warmedConfigs.has(configName)) {
-      await converter(WARMUP_TEXT);
-      warmedConfigs.add(configName);
-    }
+    await converter(WARMUP_TEXT);
+    warmedConfigs.add(configName);
+    converterCache.set(configName, converter);
     return converter;
   }
 
@@ -178,7 +184,7 @@
   function rememberOriginal(node, resetOriginal = false) {
     let entry = nodeStates.get(node);
     if (!entry) {
-      entry = { original: node.nodeValue, version: 1, convertedConfig: null, convertedText: null };
+      entry = { original: node.nodeValue, version: INITIAL_NODE_VERSION, convertedConfig: null, convertedText: null };
       nodeStates.set(node, entry);
     } else if (resetOriginal) {
       entry.original = node.nodeValue;
@@ -234,7 +240,7 @@
 
   function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
     if (!state.enabled) return;
-    if (state.fullScanTimer) clearTimeout(state.fullScanTimer);
+    if (state.fullScanTimer) { clearTimeout(state.fullScanTimer); state.fullScanTimer = 0; }
     state.fullScanTimer = setTimeout(() => {
       state.fullScanTimer = 0;
       if (!state.enabled || !document.body) return;
@@ -248,7 +254,7 @@
         setStatus(STATUS_ON_PREFIX + state.config);
       }
       if (state.enabled) startObserving();
-    }, delay);
+    }, Math.max(delay, MIN_FULL_SCAN_DELAY_MS));
   }
 
   function scheduleProcess(delay = PROCESS_DEBOUNCE_MS) {
@@ -332,7 +338,6 @@
       }
     } catch (err) {
       console.error("[OpenCC-WASM userscript] OpenCC load/process error:", err);
-      state.converterErrorCount = 0;
       state.moduleLoadErrorCount++;
       if (state.moduleLoadErrorCount >= MAX_MODULE_LOAD_ERRORS) {
         setStatus("Load failed – reload page to retry", false, true);
@@ -356,6 +361,8 @@
       if (mutation.type === "characterData") {
         const node = mutation.target;
         if (shouldProcessTextNode(node)) {
+          const ns = nodeStates.get(node);
+          if (ns && node.nodeValue === ns.convertedText) continue;
           if (enqueueTextNode(node, true)) enqueued++;
         } else {
           nodeStates.delete(node);
@@ -404,6 +411,7 @@
             if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
             return NodeFilter.FILTER_SKIP;
           }
+          if (!nodeStates.has(node)) return NodeFilter.FILTER_SKIP;
           return NodeFilter.FILTER_ACCEPT;
         }
       }
@@ -430,6 +438,7 @@
       stopObserving(false);
       state.enabled = false;
       storeSet("enabled", false);
+      while (state.processing) await yieldToMain();
       await restoreOriginals();
       setStatus("Off");
     } else {
@@ -521,10 +530,11 @@
 .footer-hint{font-size:10px;color:var(--text-3);opacity:.5}
 `;
 
+    const DOM_PROPS = new Set(["className", "title", "hidden", "type", "textContent", "htmlFor"]);
     function el(tag, attrs = {}, ...children) {
       const node = document.createElement(tag);
       for (const [k, v] of Object.entries(attrs)) {
-        if (k === "className") node.className = v;
+        if (DOM_PROPS.has(k)) node[k] = v;
         else node.setAttribute(k, v);
       }
       for (const child of children) {
@@ -598,6 +608,12 @@
       }
     };
     document.addEventListener("pointerup", state.ui.onDocPointerUp, { capture: false });
+
+    new MutationObserver(() => {
+      if (!host.isConnected && state.ui?.onDocPointerUp) {
+        document.removeEventListener("pointerup", state.ui.onDocPointerUp, { capture: false });
+      }
+    }).observe(document.body, { childList: true, subtree: false });
 
     setupDrag();
     refreshControls();
@@ -699,10 +715,16 @@
       requestAnimationFrame(() => applyPosition(savedPos.left, savedPos.top));
     }
 
+    let cachedHostW = 0;
+    let cachedHostH = 0;
+    requestAnimationFrame(() => {
+      cachedHostW = state.ui.host.offsetWidth;
+      cachedHostH = state.ui.host.offsetHeight;
+    });
+
     function applyPosition(left, top) {
-      const { offsetWidth: hostW, offsetHeight: hostH } = state.ui.host;
-      const maxL = window.innerWidth - hostW;
-      const maxT = window.innerHeight - hostH;
+      const maxL = window.innerWidth - cachedHostW;
+      const maxT = window.innerHeight - cachedHostH;
       state.ui.host.style.right = "auto";
       state.ui.host.style.bottom = "auto";
       state.ui.host.style.left = Math.max(0, Math.min(left, maxL)) + "px";
@@ -740,6 +762,8 @@
     function syncDirection() { if (!state.collapsed) updatePanelDirection(); }
 
     window.addEventListener("resize", () => requestAnimationFrame(() => {
+      cachedHostW = state.ui.host.offsetWidth;
+      cachedHostH = state.ui.host.offsetHeight;
       const rect = state.ui.host.getBoundingClientRect();
       applyPosition(rect.left, rect.top);
       syncDirection();
