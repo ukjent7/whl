@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      4.0.0
+// @version      4.0.1
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -10,6 +10,7 @@
 // @noframes
 // @grant        none
 // ==/UserScript==
+/* global scheduler */
 
 (function () {
   "use strict";
@@ -630,8 +631,9 @@
   }
 
   function updateConfigListSelection() {
-    for (const item of state.ui.configList.querySelectorAll(".config-item"))
+    for (const item of state.ui.configList.querySelectorAll(".config-item")){
       item.classList.toggle("selected", item.dataset.value === state.config);
+    }
   }
 
   function updateCategoryTabs() {
