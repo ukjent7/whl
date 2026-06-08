@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.9.0
+// @version      4.0.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -83,7 +83,6 @@
     queue:               [],
     queuedNodes:         new WeakSet(),
     processing:          false,
-    writingBack:         false,
     generation:          0,
     observing:           false,
     processTimer:        0,
@@ -312,8 +311,6 @@
 
         if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
 
-        state.writingBack = true;
-        stopObserving(false);
         try {
           for (const { item, result } of converted) {
             if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
@@ -326,7 +323,6 @@
             item.state.convertedText = convertedText;
           }
         } finally {
-          state.writingBack = false;
           if (state.enabled) {
             const pending = observer.takeRecords();
             startObserving();
@@ -358,7 +354,7 @@
   }
 
   function handleMutations(mutations) {
-    if (!state.enabled || state.writingBack) return;
+    if (!state.enabled) return;
     let enqueued = 0;
     for (const mutation of mutations) {
       if (mutation.type === "characterData") {
@@ -370,6 +366,13 @@
         }
       } else if (mutation.type === "childList") {
         for (const added of mutation.addedNodes) enqueued += collectTextNodes(added, false);
+        if (mutation.removedNodes.length && state.queue.length) {
+          state.queue = state.queue.filter(n => {
+            if (n.isConnected) return true;
+            state.queuedNodes.delete(n);
+            return false;
+          });
+        }
       }
     }
     if (enqueued > 0) scheduleProcess(PROCESS_DEBOUNCE_MS);
@@ -393,7 +396,7 @@
     if (state.fullScanTimer) { clearTimeout(state.fullScanTimer); state.fullScanTimer = 0; }
   }
 
-  function restoreOriginals() {
+  async function restoreOriginals() {
     clearScheduledTimers();
     stopObserving(false);
     const walker = document.createTreeWalker(
@@ -410,15 +413,19 @@
       }
     );
     let node;
+    let batchCount = 0;
     while ((node = walker.nextNode())) {
       if (node.nodeType !== Node.TEXT_NODE) continue;
       const ns = nodeStates.get(node);
-      if (ns && node.isConnected && node.nodeValue !== ns.original) node.nodeValue = ns.original;
+      if (ns && node.isConnected && node.nodeValue !== ns.original) {
+        node.nodeValue = ns.original;
+        if (++batchCount % CHUNK_SIZE === 0) await yieldToMain();
+      }
     }
     clearQueue();
   }
 
-  function setEnabled(nextEnabled) {
+  async function setEnabled(nextEnabled) {
     nextEnabled = Boolean(nextEnabled);
     if (nextEnabled === state.enabled) { refreshControls(); return; }
     state.generation++;
@@ -427,7 +434,7 @@
       stopObserving(false);
       state.enabled = false;
       storeSet("enabled", false);
-      restoreOriginals();
+      await restoreOriginals();
       setStatus("Off");
     } else {
       state.enabled = true;
@@ -587,7 +594,8 @@
 
     state.ui.onDocPointerUp = (e) => {
       if (state.collapsed || !state.ui) return;
-      if (!state.ui.host.shadowRoot.contains(e.composedPath()[0])) {
+      const inside = e.composedPath().some(n => n === state.ui.host);
+      if (!inside) {
         state.collapsed = true;
         storeSet("collapsed", state.collapsed);
         refreshControls();
