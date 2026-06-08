@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      3.8.0
+// @version      3.9.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -22,6 +22,8 @@
   const FULL_SCAN_DEBOUNCE_MS = 60;
   const MAX_CONVERTER_ERRORS = 5;
   const CONVERTER_RETRY_BASE_MS = 200;
+  const MAX_MODULE_LOAD_ERRORS = 3;
+  const MODULE_LOAD_RETRY_BASE_MS = 2000;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
   const STORE_PREFIX = "openccWasmUserscript.";
   const WARMUP_TEXT = "伺服器发现資訊只鸡";
@@ -87,7 +89,8 @@
     processTimer:        0,
     fullScanTimer:       0,
     collapsing:          false,
-    converterErrorCount: 0,
+    converterErrorCount:    0,
+    moduleLoadErrorCount:   0,
     status:              { text: "", busy: false, error: false },
     ui:                  null,
   };
@@ -243,7 +246,7 @@
       if (!state.enabled || !document.body) return;
       stopObserving(true);
       clearQueue();
-      const count = collectTextNodes(document.body, false);
+      const count = collectTextNodes(document.body, true);
       if (count > 0) {
         setStatus(`Queued ${count} text nodes`, true);
         scheduleProcess(0);
@@ -270,6 +273,7 @@
     try {
       setStatus(`Loading ${myConfig}…`, true);
       const converter = await getConverter(myConfig);
+      state.moduleLoadErrorCount = 0;
       if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) return;
 
       while (state.enabled && state.generation === myGeneration && state.config === myConfig && state.queue.length) {
@@ -323,7 +327,11 @@
           }
         } finally {
           state.writingBack = false;
-          if (state.enabled) startObserving();
+          if (state.enabled) {
+            const pending = observer.takeRecords();
+            startObserving();
+            if (pending.length) handleMutations(pending);
+          }
         }
         await yieldToMain();
       }
@@ -332,7 +340,16 @@
         setStatus(STATUS_ON_PREFIX + myConfig);
     } catch (err) {
       console.error("[OpenCC-WASM userscript] OpenCC load/process error:", err);
-      setStatus("OpenCC error", false, true);
+      state.converterErrorCount = 0;
+      state.moduleLoadErrorCount++;
+      if (state.moduleLoadErrorCount >= MAX_MODULE_LOAD_ERRORS) {
+        setStatus("Load failed – reload page to retry", false, true);
+        clearQueue();
+        return;
+      }
+      const backoff = MODULE_LOAD_RETRY_BASE_MS * state.moduleLoadErrorCount;
+      setStatus(`Load error – retrying in ${backoff / 1000}s…`, false, true);
+      await new Promise(r => setTimeout(r, backoff));
     } finally {
       state.processing = false;
       if (state.enabled && state.queue.length) scheduleProcess(0);
@@ -568,14 +585,15 @@
 
     toggle.addEventListener("click", () => setEnabled(!state.enabled));
 
-    document.addEventListener("pointerup", (e) => {
+    state.ui.onDocPointerUp = (e) => {
       if (state.collapsed || !state.ui) return;
       if (!state.ui.host.shadowRoot.contains(e.composedPath()[0])) {
         state.collapsed = true;
         storeSet("collapsed", state.collapsed);
         refreshControls();
       }
-    }, { capture: false });
+    };
+    document.addEventListener("pointerup", state.ui.onDocPointerUp, { capture: false });
 
     setupDrag();
     refreshControls();
