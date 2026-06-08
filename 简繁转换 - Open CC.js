@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      4.0.1
+// @version      4.1.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -18,7 +18,7 @@
   const OPENCC_ESM_URL = "https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js";
   const DEFAULT_CONFIG = "s2twp";
   const DEFAULT_ENABLED = true;
-  const CHUNK_SIZE = 80;
+  const CHUNK_SIZE = 300;
   const PROCESS_DEBOUNCE_MS = 80;
   const FULL_SCAN_DEBOUNCE_MS = 60;
   const MAX_CONVERTER_ERRORS = 5;
@@ -98,8 +98,9 @@
   state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
 
   const nodeStates = new WeakMap();
-  const CONVERTER_CACHE_MAX = 3;
-  const converterPromises = new Map();
+  let openccModulePromise = null;
+  let openccModule = null;
+  const warmedConfigs = new Set();
   const observer = new MutationObserver(handleMutations);
 
   main().catch(err => {
@@ -142,30 +143,22 @@
   }
 
   async function getConverter(configName) {
-    if (converterPromises.has(configName)) {
-      const cached = converterPromises.get(configName);
-      converterPromises.delete(configName);
-      converterPromises.set(configName, cached);
-      return cached;
-    }
-    const promise = (async () => {
-      try {
-        const mod = await import(OPENCC_ESM_URL);
-        const OpenCC = mod.default || mod;
-        const converter = OpenCC.Converter({ config: configName });
-        await converter(WARMUP_TEXT);
-        return converter;
-      } catch (err) {
-        converterPromises.delete(configName);
+    if (!openccModulePromise) {
+      openccModulePromise = import(OPENCC_ESM_URL).then(mod => {
+        openccModule = mod.default || mod;
+        return openccModule;
+      }).catch(err => {
+        openccModulePromise = null;
         throw err;
-      }
-    })();
-    if (converterPromises.size >= CONVERTER_CACHE_MAX) {
-      const lruKey = converterPromises.keys().next().value;
-      converterPromises.delete(lruKey);
+      });
     }
-    converterPromises.set(configName, promise);
-    return promise;
+    await openccModulePromise;
+    const converter = openccModule.Converter({ config: configName });
+    if (!warmedConfigs.has(configName)) {
+      await converter(WARMUP_TEXT);
+      warmedConfigs.add(configName);
+    }
+    return converter;
   }
 
   function shouldSkipElement(el) {
