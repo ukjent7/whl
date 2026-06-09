@@ -1075,7 +1075,7 @@
     const list = state.ui.configList;
     list.innerHTML = "";
     list.classList.remove("switching");
-    void list.offsetWidth;
+    void list.offsetWidth; // Force a reflow so removing then re-adding the class restarts the CSS animation.
     list.classList.add("switching");
     for (const [value, label] of group.configs) {
       const item = document.createElement("div");
