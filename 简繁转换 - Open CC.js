@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      4.3.0
+// @version      4.5.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -105,7 +105,6 @@
   let openccModulePromise = null;
   let openccModule = null;
   const converterCache = new Map();
-  const warmedConfigs = new Set();
   const observer = new MutationObserver(handleMutations);
 
   main().catch(err => {
@@ -162,7 +161,6 @@
     if (converterCache.has(configName)) return converterCache.get(configName);
     const converter = openccModule.Converter({ config: configName });
     await converter(WARMUP_TEXT);
-    warmedConfigs.add(configName);
     converterCache.set(configName, converter);
     return converter;
   }
@@ -274,6 +272,7 @@
       setStatus(`Loading ${myConfig}…`, true);
       const converter = await getConverter(myConfig);
       state.moduleLoadErrorCount = 0;
+      state.converterErrorCount = 0;
       if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) return;
 
       while (state.enabled && state.generation === myGeneration && state.config === myConfig && state.queue.length) {
@@ -302,6 +301,8 @@
             console.error("[OpenCC-WASM userscript] Conversion failed:", err);
             if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
               setStatus("Conversion failed", false, true);
+              clearQueue();
+              state.converterErrorCount = 0;
               return;
             }
             await new Promise(resolve => setTimeout(resolve, CONVERTER_RETRY_BASE_MS * state.converterErrorCount));
@@ -596,7 +597,11 @@
     populateConfigList();
     updateCategoryTabs();
 
-    toggle.addEventListener("click", () => setEnabled(!state.enabled));
+    toggle.addEventListener("click", async () => {
+      toggle.disabled = true;
+      try { await setEnabled(!state.enabled); }
+      finally { toggle.disabled = false; }
+    });
 
     state.ui.onDocPointerUp = (e) => {
       if (state.collapsed || !state.ui) return;
@@ -609,11 +614,13 @@
     };
     document.addEventListener("pointerup", state.ui.onDocPointerUp, { capture: false });
 
-    new MutationObserver(() => {
+    const panelCleanupMO = new MutationObserver(() => {
       if (!host.isConnected && state.ui?.onDocPointerUp) {
         document.removeEventListener("pointerup", state.ui.onDocPointerUp, { capture: false });
+        panelCleanupMO.disconnect();
       }
-    }).observe(document.body, { childList: true, subtree: false });
+    });
+    panelCleanupMO.observe(document.body, { childList: true, subtree: false });
 
     setupDrag();
     refreshControls();
