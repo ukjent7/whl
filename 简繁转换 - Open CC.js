@@ -593,7 +593,7 @@
 .fab-dot.error{background:var(--danger)}
 
 /* --- Panel Container --- */
-.panel{position:absolute;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 0 0 1px var(--primary-glow),0 24px 64px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,0.08),inset 0 0 0 1px rgba(255,255,255,0.03);overflow:hidden;opacity:1;transform:translateY(0) scale(1);transition:opacity .3s cubic-bezier(0.2,0.8,0.2,1),transform .3s cubic-bezier(0.2,0.8,0.2,1),display .3s allow-discrete;position-anchor:--fab-anchor;position-area:block-end span-inline-end;position-try-fallbacks:block-end span-inline-start,block-start span-inline-end,block-start span-inline-start;margin:4px}
+.panel{position:fixed;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 0 0 1px var(--primary-glow),0 24px 64px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,0.08),inset 0 0 0 1px rgba(255,255,255,0.03);overflow:hidden;opacity:1;transform:translateY(0) scale(1);transition:opacity .3s cubic-bezier(0.2,0.8,0.2,1),transform .3s cubic-bezier(0.2,0.8,0.2,1),display .3s allow-discrete;position-anchor:--fab-anchor;position-area:block-end span-inline-end;position-try-fallbacks:block-end span-inline-start,block-start span-inline-end,block-start span-inline-start;margin:4px}
 @starting-style{.panel{opacity:0;transform:translateY(12px) scale(0.98)}}
 .panel[hidden]{opacity:0;transform:translateY(12px) scale(0.98);display:none;pointer-events:none}
 .panel.collapsing{opacity:0;transform:translateY(12px) scale(0.98);pointer-events:none}
@@ -823,7 +823,7 @@
     }
 
     state.ui.toggle.textContent = state.enabled ? "关" : "开";
-    state.ui.toggle.classList.toggle("btn-danger",  state.enabled);
+    state.ui.toggle.classList.toggle("btn-danger", state.enabled);
     state.ui.toggle.classList.toggle("btn-primary", !state.enabled);
     updateStatusDots();
   }
