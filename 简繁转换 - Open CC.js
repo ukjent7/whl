@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      4.5.2
+// @version      4.6.1
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -28,7 +28,7 @@
   const MODULE_LOAD_RETRY_BASE_MS = 2000;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
   const STORE_PREFIX = "openccWasmUserscript.";
-  const WARMUP_TEXT = "伺服器发现資訊只鸡転変規範";
+  const WARMUP_TEXT = "的";
   const STATUS_ON_PREFIX = "On · ";
   const INITIAL_NODE_VERSION = 1;
 
@@ -83,9 +83,9 @@
     : () => new Promise(r => setTimeout(r, 0));
 
   const state = {
-    config:              readConfig(),
-    enabled:             storeGet("enabled", DEFAULT_ENABLED),
-    collapsed:           storeGet("collapsed", false),
+    config:              DEFAULT_CONFIG,
+    enabled:             DEFAULT_ENABLED,
+    collapsed:           false,
     queue:               [],
     queuedNodes:         new WeakSet(),
     processing:          false,
@@ -94,13 +94,19 @@
     processTimer:        0,
     fullScanTimer:       0,
     collapsing:          false,
+    toggling:            false,
     converterErrorCount:    0,
     moduleLoadErrorCount:   0,
     status:              { text: "", busy: false, error: false },
     ui:                  null,
   };
 
-  state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
+  function initState() {
+    state.config = readConfig();
+    state.enabled = storeGet("enabled", DEFAULT_ENABLED);
+    state.collapsed = storeGet("collapsed", false);
+    state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
+  }
 
   const nodeStates = new WeakMap();
   let openccModulePromise = null;
@@ -254,7 +260,7 @@
     state.fullScanTimer = setTimeout(() => {
       state.fullScanTimer = 0;
       if (!state.enabled || !document.body) return;
-      stopObserving(true);
+      stopObserving(false);
       clearQueue();
       const count = collectTextNodes(document.body, true);
       if (count > 0) {
@@ -322,6 +328,10 @@
           } catch (err) {
             state.converterErrorCount++;
             console.error("[OpenCC-WASM userscript] Conversion failed:", err);
+            if (!state.queuedNodes.has(item.node)) {
+              state.queuedNodes.add(item.node);
+              state.queue.unshift(item.node);
+            }
             if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
               setStatus("Conversion failed", false, true);
               clearQueue();
@@ -390,8 +400,14 @@
           if (ns) {
             if (node.nodeValue === ns.convertedText) continue;
             if (node.nodeValue === ns.original) continue;
+            if (!state.queuedNodes.has(node)) {
+              state.queuedNodes.add(node);
+              state.queue.push(node);
+              enqueued++;
+            }
+          } else {
+            if (enqueueTextNode(node, true)) enqueued++;
           }
-          if (enqueueTextNode(node, true)) enqueued++;
         } else {
           nodeStates.delete(node);
         }
@@ -429,7 +445,7 @@
 
   async function restoreOriginals() {
     clearScheduledTimers();
-    stopObserving(false);
+    stopObserving(true);
     const walker = document.createTreeWalker(
       document.body,
       NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
@@ -461,26 +477,32 @@
     if (nextEnabled === state.enabled) { refreshControls(); return; }
     state.generation++;
     clearScheduledTimers();
-    if (!nextEnabled) {
-      stopObserving(false);
-      state.enabled = false;
-      storeSet("enabled", false);
-      const deadline = Date.now() + 3000;
-      while (state.processing && Date.now() < deadline) await yieldToMain();
-      await restoreOriginals();
-      setStatus("Off");
-    } else {
-      state.enabled = true;
-      storeSet("enabled", true);
-      setStatus(STATUS_ON_PREFIX + state.config, true);
-      startObserving();
-      scheduleFullScan(0);
+    state.toggling = true;
+    try {
+      if (!nextEnabled) {
+        stopObserving(false);
+        state.enabled = false;
+        storeSet("enabled", false);
+        const deadline = Date.now() + 3000;
+        while (state.processing && Date.now() < deadline) await yieldToMain();
+        await restoreOriginals();
+        setStatus("Off");
+      } else {
+        state.enabled = true;
+        storeSet("enabled", true);
+        setStatus(STATUS_ON_PREFIX + state.config, true);
+        startObserving();
+        scheduleFullScan(0);
+      }
+    } finally {
+      state.toggling = false;
     }
     refreshControls();
   }
 
   function setConfig(nextConfig) {
     if (!CONFIG_VALUES.has(nextConfig)) return;
+    if (state.toggling) return;
     if (nextConfig === state.config) { refreshControls(); return; }
     state.config = nextConfig;
     storeSet("config", state.config);
@@ -701,6 +723,7 @@
         state.ui.panel.classList.add("collapsing");
         state.ui.panel.addEventListener("animationend", function onEnd() {
           state.ui.panel.removeEventListener("animationend", onEnd);
+          if (!state.collapsing) return;
           state.ui.panel.classList.remove("collapsing");
           state.ui.panel.hidden = true;
           state.ui.fab.hidden = false;
@@ -745,8 +768,8 @@
     let startX, startY, startLeft, startTop, moved = false;
     const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
-    let cachedHostW = 0;
-    let cachedHostH = 0;
+    let cachedHostW = state.ui.host.offsetWidth || 52;
+    let cachedHostH = state.ui.host.offsetHeight || 52;
     requestAnimationFrame(() => {
       cachedHostW = state.ui.host.offsetWidth;
       cachedHostH = state.ui.host.offsetHeight;
