@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      4.5.0
+// @version      4.5.1
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -159,8 +159,19 @@
     }
     await openccModulePromise;
     if (converterCache.has(configName)) return converterCache.get(configName);
-    const converter = openccModule.Converter({ config: configName });
-    await converter(WARMUP_TEXT);
+    const buildPromise = (async () => {
+      let converter;
+      try {
+        converter = openccModule.Converter({ config: configName });
+        await converter(WARMUP_TEXT);
+      } catch (err) {
+        converterCache.delete(configName);
+        throw new Error(`Failed to build converter for '${configName}': ${err?.message ?? err}`);
+      }
+      return converter;
+    })();
+    converterCache.set(configName, buildPromise);
+    const converter = await buildPromise;
     converterCache.set(configName, converter);
     return converter;
   }
@@ -270,7 +281,18 @@
     const myConfig = state.config;
     try {
       setStatus(`Loading ${myConfig}…`, true);
-      const converter = await getConverter(myConfig);
+      let converter;
+      try {
+        converter = await getConverter(myConfig);
+      } catch (err) {
+        const msg = err?.message ?? String(err);
+        if (msg.includes(`'${myConfig}'`)) {
+          setStatus(`Config '${myConfig}' failed – ${msg}`, false, true);
+          clearQueue();
+          return;
+        }
+        throw err;
+      }
       state.moduleLoadErrorCount = 0;
       state.converterErrorCount = 0;
       if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) return;
@@ -325,13 +347,14 @@
             item.state.convertedText = convertedText;
           }
         } finally {
-          if (state.enabled) {
-            const pending = observer.takeRecords();
-            startObserving();
-            if (pending.length) handleMutations(pending);
-          }
+          if (state.enabled) startObserving();
         }
         await yieldToMain();
+      }
+
+      if (state.enabled) {
+        const pending = observer.takeRecords();
+        if (pending.length) handleMutations(pending);
       }
 
       if (state.enabled && state.generation === myGeneration && state.config === myConfig){
@@ -363,7 +386,10 @@
         const node = mutation.target;
         if (shouldProcessTextNode(node)) {
           const ns = nodeStates.get(node);
-          if (ns && node.nodeValue === ns.convertedText) continue;
+          if (ns) {
+            if (node.nodeValue === ns.convertedText) continue;
+            if (node.nodeValue === ns.original) continue;
+          }
           if (enqueueTextNode(node, true)) enqueued++;
         } else {
           nodeStates.delete(node);
@@ -418,14 +444,13 @@
       }
     );
     let node;
-    let batchCount = 0;
+    let iterCount = 0;
     while ((node = walker.nextNode())) {
-      if (node.nodeType !== Node.TEXT_NODE) continue;
       const ns = nodeStates.get(node);
       if (ns && node.isConnected && node.nodeValue !== ns.original) {
         node.nodeValue = ns.original;
-        if (++batchCount % CHUNK_SIZE === 0) await yieldToMain();
       }
+      if (++iterCount % CHUNK_SIZE === 0) await yieldToMain();
     }
     clearQueue();
   }
@@ -439,7 +464,8 @@
       stopObserving(false);
       state.enabled = false;
       storeSet("enabled", false);
-      while (state.processing) await yieldToMain();
+      const deadline = Date.now() + 3000;
+      while (state.processing && Date.now() < deadline) await yieldToMain();
       await restoreOriginals();
       setStatus("Off");
     } else {
@@ -718,15 +744,14 @@
     let startX, startY, startLeft, startTop, moved = false;
     const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
-    if (savedPos && typeof savedPos.left === "number"){
-      requestAnimationFrame(() => applyPosition(savedPos.left, savedPos.top));
-    }
-
     let cachedHostW = 0;
     let cachedHostH = 0;
     requestAnimationFrame(() => {
       cachedHostW = state.ui.host.offsetWidth;
       cachedHostH = state.ui.host.offsetHeight;
+      if (savedPos && typeof savedPos.left === "number") {
+        applyPosition(savedPos.left, savedPos.top);
+      }
     });
 
     function applyPosition(left, top) {
