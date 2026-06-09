@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      4.6.2
+// @version      4.7.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -93,7 +93,6 @@
     observing:           false,
     processTimer:        0,
     fullScanTimer:       0,
-    collapsing:          false,
     toggling:            false,
     converterErrorCount:    0,
     moduleLoadErrorCount:   0,
@@ -560,24 +559,32 @@
 
     const style = document.createElement("style");
     style.textContent = `
-:host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(10,10,18,.88);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.09);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a}
+:host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(10,10,18,.88);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.09);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a;anchor-name:--fab-anchor}
+/* ① .dragging: block text selection on <html> during drag without touching body.style */
+:host(.dragging){-webkit-user-select:none;user-select:none}
 *{box-sizing:border-box;margin:0;padding:0}
 @keyframes dotBlink{0%,100%{opacity:1}50%{opacity:.3}}
-@keyframes panelIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-@keyframes panelOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(8px)}}
+/* ① Panel show/hide: CSS transition + @starting-style replaces animationend callback */
 .fab{position:absolute;right:0;bottom:0;width:52px;height:52px;z-index:2;border-radius:16px;border:1px solid var(--border-strong);background:var(--bg);backdrop-filter:blur(24px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform .18s ease,box-shadow .2s ease;box-shadow:0 8px 32px rgba(0,0,0,.5)}
 .fab:hover{transform:scale(1.08) translateY(-2px)}
 .fab:active{transform:scale(.95)}
 .fab[hidden]{display:none!important}
-.fab.busy{box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 2px var(--warning)}
+/* ⑥ fab busy box-shadow driven by child dot state via :has() — no JS class needed */
+.fab:has(.fab-dot.busy){box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 2px var(--warning)}
 .fab-inner{font-size:18px;line-height:1;color:var(--text-1);font-weight:700}
 .fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border-radius:50%;border:1.5px solid rgba(10,10,18,.9);background:var(--text-3);transition:background .3s ease}
 .fab-dot.on{background:var(--success)}
 .fab-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}
 .fab-dot.error{background:var(--danger)}
-.panel{position:absolute;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 24px 64px rgba(0,0,0,.6);overflow:hidden;animation:panelIn .2s ease}
-.panel[hidden]{display:none!important}
-.panel.collapsing{animation:panelOut .18s ease forwards;pointer-events:none}
+/* ① Panel: transition replaces keyframe animation + animationend JS callback.
+      display:none transition uses allow-discrete (Chrome 117+).
+      @starting-style provides the enter state for opacity/transform. */
+.panel{position:absolute;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 24px 64px rgba(0,0,0,.6);overflow:hidden;opacity:1;transform:translateY(0);transition:opacity .2s ease,transform .2s ease,display .2s allow-discrete;
+/* ⑦ Anchor positioning: panel snaps to the fab anchor, flips on-screen automatically */
+  position-anchor:--fab-anchor;inset-area:block-end span-inline-end;position-try-fallbacks:block-end span-inline-start,block-start span-inline-end,block-start span-inline-start;margin:4px}
+@starting-style{.panel{opacity:0;transform:translateY(8px)}}
+.panel[hidden]{opacity:0;transform:translateY(8px);display:none;pointer-events:none}
+.panel.collapsing{opacity:0;transform:translateY(8px);pointer-events:none}
 .header{display:flex;align-items:center;gap:8px;padding:11px 14px 10px;cursor:grab;user-select:none;border-bottom:1px solid var(--border)}
 .header:active{cursor:grabbing}
 .header-dot{width:7px;height:7px;border-radius:50%;background:var(--text-3);flex-shrink:0;transition:background .3s}
@@ -594,6 +601,12 @@
 .cat-btn{flex:1;border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--text-3);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1.25;text-align:center}
 .cat-btn:hover{border-color:var(--border-strong);color:var(--text-2);background:var(--bg-card)}
 .cat-btn.active{color:#fff;border-color:transparent;background:var(--cat-color,var(--primary))}
+/* ②③ --cat-color per category declared here; no inline style or JS setProperty needed */
+.cat-btn[data-cat="s2t"]   {--cat-color:#f59e0b}
+.cat-btn[data-cat="t2s"]   {--cat-color:#10b981}
+.cat-btn[data-cat="tw2hk"] {--cat-color:#8b5cf6}
+.cat-btn[data-cat="jp"]    {--cat-color:#ec4899}
+.cat-btn[data-cat="cngov"] {--cat-color:#6366f1}
 .body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}
 .config-list{flex:1;overflow-y:scroll;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
 @keyframes listFade{from{opacity:0}to{opacity:1}}
@@ -607,6 +620,7 @@
 .config-item.selected .config-radio::after{opacity:1}
 .config-label{font-size:13px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}
 .config-item.selected .config-label{color:var(--text-1)}
+/* ⑤ .btn base only; btn-primary / btn-danger toggled by JS classList.toggle */
 .btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s;display:flex;align-items:center;justify-content:center}
 .btn:hover{opacity:.85}
 .btn:active{transform:scale(.97)}
@@ -655,6 +669,14 @@
     const panel = el("div", { className: "panel" }, header, bodyEl, footer);
     panel.hidden = true;
 
+    panel.addEventListener("transitionend", (e) => {
+      if (e.propertyName === "opacity" && panel.classList.contains("collapsing")) {
+        panel.classList.remove("collapsing");
+        panel.hidden = true;
+        state.ui.fab.hidden = false;
+      }
+    });
+
     root.appendChild(style);
     root.appendChild(fab);
     root.appendChild(panel);
@@ -672,7 +694,6 @@
       btn.className = "cat-btn";
       btn.dataset.cat = group.id;
       btn.textContent = group.label;
-      btn.style.setProperty("--cat-color", group.color);
       btn.addEventListener("click", () => {
         state.ui.activeCategory = group.id;
         populateConfigList();
@@ -742,10 +763,7 @@
 
   function updateCategoryTabs() {
     for (const btn of state.ui.categories.querySelectorAll(".cat-btn")) {
-      const isActive = btn.dataset.cat === state.ui.activeCategory;
-      btn.classList.toggle("active", isActive);
-      const group = CONFIG_GROUPS.find(g => g.id === btn.dataset.cat);
-      btn.style.background = isActive && group ? group.color : "";
+      btn.classList.toggle("active", btn.dataset.cat === state.ui.activeCategory);
     }
   }
 
@@ -758,31 +776,19 @@
 
     if (state.collapsed) {
       unbindOutsideClick();
-      if (!state.ui.panel.hidden && !state.collapsing) {
-        state.collapsing = true;
+      if (!state.ui.panel.hidden) {
         state.ui.panel.classList.add("collapsing");
-        state.ui.panel.addEventListener("animationend", function onEnd() {
-          state.ui.panel.removeEventListener("animationend", onEnd);
-          if (!state.collapsing) return;
-          state.ui.panel.classList.remove("collapsing");
-          state.ui.panel.hidden = true;
-          state.ui.fab.hidden = false;
-          state.collapsing = false;
-        }, { once: true });
-      } else if (!state.collapsing) {
-        state.ui.panel.hidden = true;
-        state.ui.fab.hidden = false;
       }
     } else {
       bindOutsideClick();
       state.ui.fab.hidden = true;
       state.ui.panel.hidden = false;
       state.ui.panel.classList.remove("collapsing");
-      state.collapsing = false;
     }
 
     state.ui.toggle.textContent = state.enabled ? "关" : "开";
-    state.ui.toggle.className = "btn " + (state.enabled ? "btn-danger" : "btn-primary");
+    state.ui.toggle.classList.toggle("btn-danger",  state.enabled);
+    state.ui.toggle.classList.toggle("btn-primary", !state.enabled);
     updateStatusDots();
   }
 
@@ -792,7 +798,6 @@
     const stateClass = error ? "error" : busy ? "busy" : state.enabled ? "on" : "";
     state.ui.fabDot.className = "fab-dot " + stateClass;
     state.ui.headerDot.className = "header-dot " + stateClass;
-    state.ui.fab.classList.toggle("busy", busy);
   }
 
   function setStatus(text, busy = false, error = false) {
@@ -828,35 +833,8 @@
       state.ui.host.style.top = Math.max(0, Math.min(top, maxT)) + "px";
     }
 
-    function updatePanelDirection() {
-      const rect = state.ui.host.getBoundingClientRect();
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-      const panel = state.ui.panel;
-      const panelW = panel.offsetWidth || 280;
-      const panelH = panel.offsetHeight || 275;
 
-      const spaceRight = vw - rect.right;
-      const spaceLeft = rect.left;
-      const spaceBelow = vh - rect.bottom;
-      const spaceAbove = rect.top;
-
-      const anchorRight = spaceRight >= panelW ? false
-                         : spaceLeft >= panelW ? true
-                         : spaceLeft > spaceRight;
-
-      const anchorBottom = spaceAbove >= panelH ? true
-                         : spaceBelow >= panelH ? false
-                         : true;
-
-      panel.style.right = anchorRight ? "0" : "";
-      panel.style.left = anchorRight ? "" : "0";
-      panel.style.bottom = anchorBottom ? "0" : "";
-      panel.style.top = anchorBottom ? "" : "0";
-      panel.style.transformOrigin = `${anchorBottom ? "bottom" : "top"} ${anchorRight ? "right" : "left"}`;
-    }
-
-    function syncDirection() { if (!state.collapsed) updatePanelDirection(); }
+    function syncDirection() {}
 
     window.addEventListener("resize", () => requestAnimationFrame(() => {
       cachedHostW = state.ui.host.offsetWidth;
@@ -890,7 +868,6 @@
         state.collapsed = !state.collapsed;
         storeSet("collapsed", state.collapsed);
         refreshControls();
-        if (!state.collapsed) requestAnimationFrame(updatePanelDirection);
       }
     }
 
@@ -898,8 +875,7 @@
     function onMouseUp() {
       document.removeEventListener("mousemove", onMouseMove);
       document.removeEventListener("mouseup", onMouseUp);
-      document.body.style.userSelect = "";
-      document.body.style.webkitUserSelect = "";
+      state.ui.host.classList.remove("dragging");
       onUpLogic();
     }
 
@@ -908,12 +884,9 @@
       startDrag(e.clientX, e.clientY);
       document.addEventListener("mousemove", onMouseMove);
       document.addEventListener("mouseup", onMouseUp);
-      document.body.style.userSelect = "none";
-      document.body.style.webkitUserSelect = "none";
+      state.ui.host.classList.add("dragging");
       e.preventDefault();
     }
-
-    requestAnimationFrame(updatePanelDirection);
 
     state.ui.fab.addEventListener("mousedown", startMouseDrag);
     state.ui.header.addEventListener("mousedown", startMouseDrag);
