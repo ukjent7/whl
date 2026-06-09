@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      4.7.0
+// @version      4.8.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -18,7 +18,8 @@
   const OPENCC_ESM_URL = "https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js";
   const DEFAULT_CONFIG = "t2s";
   const DEFAULT_ENABLED = true;
-  const CHUNK_SIZE = 300;
+  const CONVERT_CHUNK_SIZE = 300;
+  const RESTORE_YIELD_INTERVAL = 300;
   const PROCESS_DEBOUNCE_MS = 80;
   const FULL_SCAN_DEBOUNCE_MS = 60;
   const MIN_FULL_SCAN_DELAY_MS = 16;
@@ -27,7 +28,7 @@
   const MAX_MODULE_LOAD_ERRORS = 3;
   const MODULE_LOAD_RETRY_BASE_MS = 2000;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
-  const STORE_PREFIX = "openccWasmUserscript.";
+  const STORE_PREFIX = "openccWasmUserscript.v1.";
   const WARMUP_TEXT = "的";
   const STATUS_ON_PREFIX = "On · ";
   const INITIAL_NODE_VERSION = 1;
@@ -170,23 +171,18 @@
     await openccModulePromise;
     if (converterCache.has(configName)) return converterCache.get(configName);
     const buildPromise = (async () => {
-      let converter;
-      try {
-        converter = openccModule.Converter({ config: configName });
-        await converter(WARMUP_TEXT);
-      } catch (err) {
-        converterCache.delete(configName);
-        const e = new Error(`Failed to build converter for '${configName}': ${err?.message ?? err}`);
-        e.kind = "converter_init";
-        e.config = configName;
-        throw e;
-      }
+      const converter = openccModule.Converter({ config: configName });
+      await converter(WARMUP_TEXT);
       return converter;
-    })();
+    })().catch(err => {
+      converterCache.delete(configName);
+      const e = new Error(`Failed to build converter for '${configName}': ${err?.message ?? err}`);
+      e.kind = "converter_init";
+      e.config = configName;
+      throw e;
+    });
     converterCache.set(configName, buildPromise);
-    const converter = await buildPromise;
-    converterCache.set(configName, converter);
-    return converter;
+    return buildPromise;
   }
 
   function shouldSkipElement(el) {
@@ -266,6 +262,7 @@
     while ((node = walker.nextNode())) {
       const ns = nodeStates.get(node);
       if (!ns) continue;
+      if (!shouldProcessTextNode(node)) continue;
       if (ns.convertedConfig === state.config) continue;
       if (!state.queuedNodes.has(node)) {
         state.queuedNodes.add(node);
@@ -329,7 +326,7 @@
 
       while (state.enabled && state.generation === myGeneration && state.config === myConfig && state.queue.length) {
         const chunk = [];
-        while (state.queue.length && chunk.length < CHUNK_SIZE) {
+        while (state.queue.length && chunk.length < CONVERT_CHUNK_SIZE) {
           const node = state.queue.shift();
           state.queuedNodes.delete(node);
           if (!node.isConnected || !shouldProcessTextNode(node)) continue;
@@ -373,7 +370,14 @@
           for (const { item, result } of converted) {
             if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
             const currentState = nodeStates.get(item.node);
-            if (currentState !== item.state || item.state.version !== item.version) continue;
+            if (currentState !== item.state || item.state.version !== item.version) {
+              if (item.node.isConnected && shouldProcessTextNode(item.node)
+                  && !state.queuedNodes.has(item.node)) {
+                state.queuedNodes.add(item.node);
+                state.queue.push(item.node);
+              }
+              continue;
+            }
             if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
             const convertedText = String(result);
             if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
@@ -400,15 +404,21 @@
       if (state.moduleLoadErrorCount >= MAX_MODULE_LOAD_ERRORS) {
         setStatus("Load failed – reload page to retry", false, true);
         clearQueue();
+        state._retryDelay = 0;
         return;
       }
       const backoff = MODULE_LOAD_RETRY_BASE_MS * state.moduleLoadErrorCount;
       setStatus(`Load error – retrying in ${backoff / 1000}s…`, false, true);
-      await new Promise(r => setTimeout(r, backoff));
+      state._retryDelay = backoff;
     } finally {
       state.processing = false;
-      if (state.enabled && state.queue.length) scheduleProcess(0);
-      else if (!state.enabled) clearQueue();
+      if (state.enabled && state.queue.length) {
+        const delay = state._retryDelay ?? 0;
+        state._retryDelay = undefined;
+        scheduleProcess(delay);
+      } else if (!state.enabled) {
+        clearQueue();
+      }
     }
   }
 
@@ -422,7 +432,7 @@
           const ns = nodeStates.get(node);
           if (ns) {
             if (node.nodeValue === ns.convertedText) continue;
-            if (node.nodeValue === ns.original) continue;
+            rememberOriginal(node, true);
             if (!state.queuedNodes.has(node)) {
               state.queuedNodes.add(node);
               state.queue.push(node);
@@ -469,6 +479,7 @@
   async function restoreOriginals() {
     clearScheduledTimers();
     stopObserving(true);
+    const myGeneration = state.generation;
     const walker = document.createTreeWalker(
       document.body,
       NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
@@ -486,11 +497,12 @@
     let node;
     let iterCount = 0;
     while ((node = walker.nextNode())) {
+      if (state.generation !== myGeneration) break;
       const ns = nodeStates.get(node);
       if (ns && node.isConnected && node.nodeValue !== ns.original) {
         node.nodeValue = ns.original;
       }
-      if (++iterCount % CHUNK_SIZE === 0) await yieldToMain();
+      if (++iterCount % RESTORE_YIELD_INTERVAL === 0) await yieldToMain();
     }
     clearQueue();
   }
@@ -834,14 +846,11 @@
     }
 
 
-    function syncDirection() {}
-
     window.addEventListener("resize", () => requestAnimationFrame(() => {
       cachedHostW = state.ui.host.offsetWidth;
       cachedHostH = state.ui.host.offsetHeight;
       const rect = state.ui.host.getBoundingClientRect();
       applyPosition(rect.left, rect.top);
-      syncDirection();
     }));
 
     function startDrag(clientX, clientY) {
@@ -863,7 +872,6 @@
       if (moved) {
         const rect = state.ui.host.getBoundingClientRect();
         storeSet("panelPos", { left: rect.left, top: rect.top });
-        syncDirection();
       } else {
         state.collapsed = !state.collapsed;
         storeSet("collapsed", state.collapsed);
