@@ -594,7 +594,7 @@
 .fab-dot.error{background:var(--danger);animation:dotBlink 1.2s ease-in-out infinite,shake 0.5s ease-in-out}
 
 /* --- Panel Container --- */
-.panel{position:fixed;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 0 0 1px var(--primary-glow),0 24px 64px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,0.08),inset 0 0 0 1px rgba(255,255,255,0.03);overflow:hidden;opacity:1;transform:translateY(0) scale(1);transition:opacity 0.35s cubic-bezier(0.16,1,0.3,1),transform 0.55s cubic-bezier(0.34,1.8,0.64,1),box-shadow 0.4s ease,display .3s allow-discrete;position-anchor:--fab-anchor;position-area:block-end span-inline-end;position-try-fallbacks:block-end span-inline-start,block-start span-inline-end,block-start span-inline-start;margin:4px}
+.panel{position:fixed;width:320px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 0 0 1px var(--primary-glow),0 24px 64px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,0.08),inset 0 0 0 1px rgba(255,255,255,0.03);overflow:hidden;opacity:1;transform:translateY(0) scale(1);transition:opacity 0.35s cubic-bezier(0.16,1,0.3,1),transform 0.55s cubic-bezier(0.34,1.8,0.64,1),box-shadow 0.4s ease,display .3s allow-discrete;position-anchor:--fab-anchor;position-area:block-end span-inline-end;position-try-fallbacks:block-end span-inline-start,block-start span-inline-end,block-start span-inline-start;margin:4px}
 @starting-style{.panel{opacity:0;transform:translateY(24px) scale(0.92) translateZ(0);box-shadow:0 4px 12px rgba(0,0,0,0.2)}}
 .panel[hidden]{opacity:0;transform:translateY(12px) scale(0.98);display:none;pointer-events:none}
 .panel::after{content:"";position:absolute;inset:-60px;border-radius:40px;background:radial-gradient(ellipse 80% 50% at 50% 0%,var(--primary-glow),transparent 70%);opacity:0.5;pointer-events:none;z-index:-1;filter:blur(20px);transition:opacity 0.4s ease}
@@ -639,7 +639,7 @@
 .config-list::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.25)}
 @keyframes listFade{from{opacity:0}to{opacity:1}}
 .config-list.switching{animation:listFade .15s ease}
-.config-item{position:relative;overflow:hidden;display:flex;align-items:flex-start;gap:7px;padding:5px 8px;border-radius:7px;cursor:pointer;transition:background .12s,border-color .12s;border:1px solid transparent}
+.config-item{position:relative;overflow:visible;display:flex;align-items:flex-start;gap:7px;padding:5px 8px;border-radius:7px;cursor:pointer;transition:background .12s,border-color .12s;border:1px solid transparent;flex-shrink:0}
 .config-item:hover{background:var(--bg-card);border-color:var(--border)}
 .config-item::before{content:"";position:absolute;left:0;top:10%;bottom:10%;width:3px;border-radius:3px;background:linear-gradient(to bottom,transparent,var(--primary),transparent);opacity:0;transform:scaleY(0);transition:opacity 0.25s ease,transform 0.4s cubic-bezier(0.34,1.8,0.64,1)}
 .config-item:hover::before{opacity:0.7;transform:scaleY(1)}
