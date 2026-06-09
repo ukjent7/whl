@@ -650,7 +650,7 @@
 .config-item.selected .config-radio{border-color:var(--primary);box-shadow:0 0 0 3px rgba(124,106,247,.15)}
 .config-radio::after{content:"";width:5px;height:5px;border-radius:50%;background:var(--primary);opacity:0;transform:scale(0);transition:transform .25s cubic-bezier(0.34,1.56,0.64,1),opacity .15s}
 .config-item.selected .config-radio::after{opacity:1;transform:scale(1)}
-.config-label{flex:1;min-width:0;font-size:13px;color:var(--text-2);line-height:1.45;overflow-wrap:break-word;word-break:normal;transition:color .12s}
+.config-label{flex:1;min-width:0;font-size:13px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}
 .config-item.selected .config-label{color:var(--text-1)}
 
 /* Dynamic Active Colors for Config Items */
