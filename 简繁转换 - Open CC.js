@@ -16,7 +16,7 @@
   "use strict";
 
   const OPENCC_ESM_URL = "https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js";
-  const DEFAULT_CONFIG = "s2twp";
+  const DEFAULT_CONFIG = "t2s";
   const DEFAULT_ENABLED = true;
   const CHUNK_SIZE = 300;
   const PROCESS_DEBOUNCE_MS = 80;
