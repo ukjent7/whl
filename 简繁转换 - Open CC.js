@@ -104,7 +104,7 @@
   function initState() {
     state.config = readConfig();
     state.enabled = storeGet("enabled", DEFAULT_ENABLED);
-    state.collapsed = storeGet("collapsed", false);
+    state.collapsed = storeGet("collapsed", true);
     state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
   }
 
