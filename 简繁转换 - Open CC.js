@@ -104,7 +104,7 @@
   function initState() {
     state.config = readConfig();
     state.enabled = storeGet("enabled", DEFAULT_ENABLED);
-    state.collapsed = storeGet("collapsed", true);
+    state.collapsed = storeGet("collapsed", false);
     state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
   }
 
@@ -120,6 +120,7 @@
   });
 
   async function main() {
+    initState();
     if (document.contentType && !/html/i.test(document.contentType)) return;
     if (document.readyState === "loading"){
       await new Promise(resolve => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
