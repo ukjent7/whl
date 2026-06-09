@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      4.8.0
+// @version      4.9.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -572,27 +572,20 @@
     const style = document.createElement("style");
     style.textContent = `
 :host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(10,10,18,.88);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.09);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a;anchor-name:--fab-anchor}
-/* ① .dragging: block text selection on <html> during drag without touching body.style */
 :host(.dragging){-webkit-user-select:none;user-select:none}
 *{box-sizing:border-box;margin:0;padding:0}
 @keyframes dotBlink{0%,100%{opacity:1}50%{opacity:.3}}
-/* ① Panel show/hide: CSS transition + @starting-style replaces animationend callback */
 .fab{position:absolute;right:0;bottom:0;width:52px;height:52px;z-index:2;border-radius:16px;border:1px solid var(--border-strong);background:var(--bg);backdrop-filter:blur(24px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform .18s ease,box-shadow .2s ease;box-shadow:0 8px 32px rgba(0,0,0,.5)}
 .fab:hover{transform:scale(1.08) translateY(-2px)}
 .fab:active{transform:scale(.95)}
 .fab[hidden]{display:none!important}
-/* ⑥ fab busy box-shadow driven by child dot state via :has() — no JS class needed */
 .fab:has(.fab-dot.busy){box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 2px var(--warning)}
-.fab-inner{font-size:18px;line-height:1;color:var(--text-1);font-weight:700}
+.fab-inner{font-size:18px;line-height:1;font-weight:800;background:linear-gradient(135deg,#a78bfa,#67e8f9);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
 .fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border-radius:50%;border:1.5px solid rgba(10,10,18,.9);background:var(--text-3);transition:background .3s ease}
 .fab-dot.on{background:var(--success)}
 .fab-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}
 .fab-dot.error{background:var(--danger)}
-/* ① Panel: transition replaces keyframe animation + animationend JS callback.
-      display:none transition uses allow-discrete (Chrome 117+).
-      @starting-style provides the enter state for opacity/transform. */
-.panel{position:absolute;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 24px 64px rgba(0,0,0,.6);overflow:hidden;opacity:1;transform:translateY(0);transition:opacity .2s ease,transform .2s ease,display .2s allow-discrete;
-/* ⑦ Anchor positioning: panel snaps to the fab anchor, flips on-screen automatically */
+.panel{position:absolute;width:280px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 0 0 1px var(--primary-glow),0 2px 8px rgba(0,0,0,.4),0 24px 64px rgba(0,0,0,.6);overflow:hidden;opacity:1;transform:translateY(0);transition:opacity .2s ease,transform .2s ease,display .2s allow-discrete;
   position-anchor:--fab-anchor;inset-area:block-end span-inline-end;position-try-fallbacks:block-end span-inline-start,block-start span-inline-end,block-start span-inline-start;margin:4px}
 @starting-style{.panel{opacity:0;transform:translateY(8px)}}
 .panel[hidden]{opacity:0;transform:translateY(8px);display:none;pointer-events:none}
@@ -603,8 +596,8 @@
 .header-dot.on{background:var(--success)}
 .header-dot.busy{background:var(--warning);animation:dotBlink 1s ease-in-out infinite}
 .header-dot.error{background:var(--danger)}
-.header-label{font-size:13px;font-weight:700;color:var(--text-2);letter-spacing:.08em;text-transform:uppercase;flex-shrink:0}
-.header-status{flex:1;font-size:12px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:ui-monospace,"SF Mono",monospace;transition:color .3s}
+.header-label{font-size:13px;font-weight:800;color:var(--text-1);letter-spacing:.02em;flex-shrink:0}
+.header-status{flex:1;font-size:12px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;transition:color .3s}
 .header-status.busy{color:var(--warning)}
 .header-status.error{color:var(--danger)}
 .body{padding:10px 0 12px;display:flex;height:200px}
@@ -613,34 +606,38 @@
 .cat-btn{flex:1;border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--text-3);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1.25;text-align:center}
 .cat-btn:hover{border-color:var(--border-strong);color:var(--text-2);background:var(--bg-card)}
 .cat-btn.active{color:#fff;border-color:transparent;background:var(--cat-color,var(--primary))}
-/* ②③ --cat-color per category declared here; no inline style or JS setProperty needed */
-.cat-btn[data-cat="s2t"]   {--cat-color:#f59e0b}
-.cat-btn[data-cat="t2s"]   {--cat-color:#10b981}
-.cat-btn[data-cat="tw2hk"] {--cat-color:#8b5cf6}
-.cat-btn[data-cat="jp"]    {--cat-color:#ec4899}
-.cat-btn[data-cat="cngov"] {--cat-color:#6366f1}
+.cat-btn[data-cat="s2t"]   {--cat-color:#f59e0b;--cat-color-alpha:rgba(245,158,11,.12);--cat-border-alpha:rgba(245,158,11,.28)}
+.cat-btn[data-cat="t2s"]   {--cat-color:#10b981;--cat-color-alpha:rgba(16,185,129,.12);--cat-border-alpha:rgba(16,185,129,.28)}
+.cat-btn[data-cat="tw2hk"] {--cat-color:#8b5cf6;--cat-color-alpha:rgba(139,92,246,.12);--cat-border-alpha:rgba(139,92,246,.28)}
+.cat-btn[data-cat="jp"]    {--cat-color:#ec4899;--cat-color-alpha:rgba(236,72,153,.12);--cat-border-alpha:rgba(236,72,153,.28)}
+.cat-btn[data-cat="cngov"] {--cat-color:#6366f1;--cat-color-alpha:rgba(99,102,241,.12);--cat-border-alpha:rgba(99,102,241,.28)}
 .body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}
 .config-list{flex:1;overflow-y:scroll;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
 @keyframes listFade{from{opacity:0}to{opacity:1}}
 .config-list.switching{animation:listFade .15s ease}
 .config-item{display:flex;align-items:flex-start;gap:7px;padding:5px 8px;border-radius:7px;cursor:pointer;transition:background .12s;border:1px solid transparent}
 .config-item:hover{background:var(--bg-card);border-color:var(--border)}
-.config-item.selected{background:rgba(124,106,247,.1);border-color:rgba(124,106,247,.25)}
+.config-item.selected{background:var(--active-cat-bg,rgba(124,106,247,.1));border-color:var(--active-cat-border,rgba(124,106,247,.25))}
 .config-radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--text-3);flex-shrink:0;margin-top:2px;display:flex;align-items:center;justify-content:center;transition:border-color .15s}
-.config-item.selected .config-radio{border-color:var(--primary)}
+.config-item.selected .config-radio{border-color:var(--primary);box-shadow:0 0 0 3px rgba(124,106,247,.2)}
 .config-radio::after{content:"";width:5px;height:5px;border-radius:50%;background:var(--primary);opacity:0;transition:opacity .15s}
 .config-item.selected .config-radio::after{opacity:1}
 .config-label{font-size:13px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}
 .config-item.selected .config-label{color:var(--text-1)}
-/* ⑤ .btn base only; btn-primary / btn-danger toggled by JS classList.toggle */
-.btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s;display:flex;align-items:center;justify-content:center}
+.categories:has([data-cat="s2t"].active)~.body-right .config-item.selected,
+.body:has([data-cat="s2t"].active) .config-item.selected{--active-cat-bg:rgba(245,158,11,.12);--active-cat-border:rgba(245,158,11,.28)}
+.body:has([data-cat="t2s"].active) .config-item.selected{--active-cat-bg:rgba(16,185,129,.12);--active-cat-border:rgba(16,185,129,.28)}
+.body:has([data-cat="tw2hk"].active) .config-item.selected{--active-cat-bg:rgba(139,92,246,.12);--active-cat-border:rgba(139,92,246,.28)}
+.body:has([data-cat="jp"].active) .config-item.selected{--active-cat-bg:rgba(236,72,153,.12);--active-cat-border:rgba(236,72,153,.28)}
+.body:has([data-cat="cngov"].active) .config-item.selected{--active-cat-bg:rgba(99,102,241,.12);--active-cat-border:rgba(99,102,241,.28)}
+.btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s,background .22s ease,border-color .22s ease;display:flex;align-items:center;justify-content:center}
 .btn:hover{opacity:.85}
 .btn:active{transform:scale(.97)}
 .btn-primary{background:linear-gradient(135deg,#6d5af0,#9b6fff);border-color:rgba(150,120,255,.25);color:#fff}
 .btn-danger{background:linear-gradient(135deg,#e8415a,#f07);border-color:rgba(240,80,100,.25);color:#fff}
 .footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.footer-version{font-size:11px;color:var(--text-3);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
-.footer-hint{font-size:10px;color:var(--text-3);opacity:.5}
+.footer-version{font-size:11px;color:var(--text-2);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
+.footer-hint{font-size:10px;color:var(--text-3);opacity:.45;letter-spacing:.03em}
 `;
 
     const DOM_PROPS = new Set(["className", "title", "hidden", "type", "textContent", "htmlFor"]);
