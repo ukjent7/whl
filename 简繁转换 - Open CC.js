@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      4.6.1
+// @version      4.6.2
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -97,6 +97,7 @@
     toggling:            false,
     converterErrorCount:    0,
     moduleLoadErrorCount:   0,
+    pendingConfig:       null,
     status:              { text: "", busy: false, error: false },
     ui:                  null,
   };
@@ -162,7 +163,9 @@
       }).catch(err => {
         openccModulePromise = null;
         openccModule = null;
-        throw err;
+        const e = new Error(`Failed to load OpenCC module: ${err?.message ?? err}`);
+        e.kind = "module_load";
+        throw e;
       });
     }
     await openccModulePromise;
@@ -174,7 +177,10 @@
         await converter(WARMUP_TEXT);
       } catch (err) {
         converterCache.delete(configName);
-        throw new Error(`Failed to build converter for '${configName}': ${err?.message ?? err}`);
+        const e = new Error(`Failed to build converter for '${configName}': ${err?.message ?? err}`);
+        e.kind = "converter_init";
+        e.config = configName;
+        throw e;
       }
       return converter;
     })();
@@ -253,6 +259,24 @@
     return count;
   }
 
+  function requeueForConfigChange() {
+    if (!document.body) return 0;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    let node;
+    let count = 0;
+    while ((node = walker.nextNode())) {
+      const ns = nodeStates.get(node);
+      if (!ns) continue;
+      if (ns.convertedConfig === state.config) continue;
+      if (!state.queuedNodes.has(node)) {
+        state.queuedNodes.add(node);
+        state.queue.push(node);
+        count++;
+      }
+    }
+    return count;
+  }
+
   function clearQueue() { state.queue = []; state.queuedNodes = new WeakSet(); }
 
   function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
@@ -293,9 +317,8 @@
       try {
         converter = await getConverter(myConfig);
       } catch (err) {
-        const msg = err?.message ?? String(err);
-        if (msg.includes(`'${myConfig}'`)) {
-          setStatus(`Config '${myConfig}' failed – ${msg}`, false, true);
+        if (err?.kind === "converter_init" && err.config === myConfig) {
+          setStatus(`Config '${myConfig}' failed – ${err.message}`, false, true);
           clearQueue();
           return;
         }
@@ -498,20 +521,33 @@
     } finally {
       state.toggling = false;
     }
-    refreshControls();
+    if (state.pendingConfig) {
+      const pending = state.pendingConfig;
+      state.pendingConfig = null;
+      setConfig(pending);
+    } else {
+      refreshControls();
+    }
   }
 
   function setConfig(nextConfig) {
     if (!CONFIG_VALUES.has(nextConfig)) return;
-    if (state.toggling) return;
+    if (state.toggling) {
+      state.pendingConfig = nextConfig;
+      return;
+    }
     if (nextConfig === state.config) { refreshControls(); return; }
     state.config = nextConfig;
     storeSet("config", state.config);
     state.generation++;
     clearQueue();
     refreshControls();
-    if (state.enabled) { setStatus(`Switching to ${state.config}…`, true); scheduleFullScan(0); }
-    else setStatus("Off");
+    if (state.enabled) {
+      setStatus(`Switching to ${state.config}…`, true);
+      const count = requeueForConfigChange();
+      if (count > 0) scheduleProcess(0);
+      else setStatus(STATUS_ON_PREFIX + state.config);
+    } else setStatus("Off");
   }
 
   function createPanel() {
@@ -628,6 +664,7 @@
       categories: categoriesEl, toggle, fab, panel,
       fabDot, headerDot, header,
       activeCategory: CONFIG_INDEX.get(state.config),
+      onDocPointerUp: null,
     };
 
     for (const group of CONFIG_GROUPS) {
@@ -653,6 +690,13 @@
       finally { toggle.disabled = false; }
     });
 
+    setupDrag();
+    refreshControls();
+    setStatus(state.status.text, state.status.busy, state.status.error);
+  }
+
+  function bindOutsideClick() {
+    if (!state.ui || state.ui.onDocPointerUp) return;
     state.ui.onDocPointerUp = (e) => {
       if (state.collapsed || !state.ui) return;
       const inside = e.composedPath().some(n => n === state.ui.host);
@@ -663,18 +707,12 @@
       }
     };
     document.addEventListener("pointerup", state.ui.onDocPointerUp, { capture: false });
+  }
 
-    const panelCleanupMO = new MutationObserver(() => {
-      if (!host.isConnected && state.ui?.onDocPointerUp) {
-        document.removeEventListener("pointerup", state.ui.onDocPointerUp, { capture: false });
-        panelCleanupMO.disconnect();
-      }
-    });
-    panelCleanupMO.observe(document.body, { childList: true, subtree: false });
-
-    setupDrag();
-    refreshControls();
-    setStatus(state.status.text, state.status.busy, state.status.error);
+  function unbindOutsideClick() {
+    if (!state.ui?.onDocPointerUp) return;
+    document.removeEventListener("pointerup", state.ui.onDocPointerUp, { capture: false });
+    state.ui.onDocPointerUp = null;
   }
 
   function populateConfigList() {
@@ -719,6 +757,7 @@
     updateCategoryTabs();
 
     if (state.collapsed) {
+      unbindOutsideClick();
       if (!state.ui.panel.hidden && !state.collapsing) {
         state.collapsing = true;
         state.ui.panel.classList.add("collapsing");
@@ -735,6 +774,7 @@
         state.ui.fab.hidden = false;
       }
     } else {
+      bindOutsideClick();
       state.ui.fab.hidden = true;
       state.ui.panel.hidden = false;
       state.ui.panel.classList.remove("collapsing");
@@ -858,6 +898,8 @@
     function onMouseUp() {
       document.removeEventListener("mousemove", onMouseMove);
       document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.userSelect = "";
+      document.body.style.webkitUserSelect = "";
       onUpLogic();
     }
 
@@ -866,6 +908,8 @@
       startDrag(e.clientX, e.clientY);
       document.addEventListener("mousemove", onMouseMove);
       document.addEventListener("mouseup", onMouseUp);
+      document.body.style.userSelect = "none";
+      document.body.style.webkitUserSelect = "none";
       e.preventDefault();
     }
 
