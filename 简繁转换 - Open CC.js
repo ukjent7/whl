@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter (Premium UI)
 // @namespace    https://tampermonkey.net/
-// @version      5.0.0
+// @version      5.1.0
 // @description  Convert webpage Chinese text using opencc-wasm with premium glassmorphism UI.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -19,7 +19,7 @@
   const DEFAULT_CONFIG = "t2s";
   const DEFAULT_ENABLED = true;
   const CONVERT_CHUNK_SIZE = 300;
-  const RESTORE_YIELD_INTERVAL = 300;
+  const RESTORE_YIELD_EVERY_N_NODES = 300;
   const PROCESS_DEBOUNCE_MS = 80;
   const FULL_SCAN_DEBOUNCE_MS = 60;
   const MIN_FULL_SCAN_DELAY_MS = 16;
@@ -100,6 +100,9 @@
     pendingConfig:       null,
     status:              { text: "", busy: false, error: false },
     ui:                  null,
+    _retryDelay:         undefined,
+    processingDone:      Promise.resolve(),
+    processingDone_resolve: null,
   };
 
   function initState() {
@@ -159,6 +162,9 @@
     if (!openccModulePromise) {
       openccModulePromise = import(OPENCC_ESM_URL).then(mod => {
         openccModule = mod.default || mod;
+        if (typeof openccModule?.Converter !== "function") {
+          throw new Error("Loaded module does not expose a Converter function");
+        }
         return openccModule;
       }).catch(err => {
         openccModulePromise = null;
@@ -250,7 +256,14 @@
       }
     );
     let node;
-    while ((node = walker.nextNode())) if (enqueueTextNode(node, resetOriginal)) count++;
+    while ((node = walker.nextNode())) {
+      rememberOriginal(node, resetOriginal);
+      if (!state.queuedNodes.has(node)) {
+        state.queuedNodes.add(node);
+        state.queue.push(node);
+        count++;
+      }
+    }
     return count;
   }
 
@@ -263,7 +276,7 @@
       const ns = nodeStates.get(node);
       if (!ns) continue;
       if (!shouldProcessTextNode(node)) continue;
-      if (ns.convertedConfig === state.config) continue;
+      if (ns.convertedConfig === state.config && node.nodeValue === ns.convertedText) continue;
       if (!state.queuedNodes.has(node)) {
         state.queuedNodes.add(node);
         state.queue.push(node);
@@ -305,6 +318,7 @@
     if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
     if (!state.queue.length) { setStatus(STATUS_ON_PREFIX + state.config); return; }
     state.processing = true;
+    state.processingDone = new Promise(r => { state.processingDone_resolve = r; });
     const myGeneration = state.generation;
     const myConfig = state.config;
     try {
@@ -385,7 +399,6 @@
             item.state.convertedText = convertedText;
           }
         } finally {
-          if (state.enabled) startObserving();
         }
         await yieldToMain();
       }
@@ -399,19 +412,31 @@
         setStatus(STATUS_ON_PREFIX + myConfig);
       }
     } catch (err) {
-      console.error("[OpenCC-WASM userscript] OpenCC load/process error:", err);
-      state.moduleLoadErrorCount++;
-      if (state.moduleLoadErrorCount >= MAX_MODULE_LOAD_ERRORS) {
-        setStatus("Load failed – reload page to retry", false, true);
+      const isModuleError = err?.kind === "module_load" || !openccModule;
+      if (isModuleError) {
+        console.error("[OpenCC-WASM userscript] Module load error:", err);
+        state.moduleLoadErrorCount++;
+        if (state.moduleLoadErrorCount >= MAX_MODULE_LOAD_ERRORS) {
+          setStatus("Load failed – reload page to retry", false, true);
+          clearQueue();
+          state._retryDelay = 0;
+          return;
+        }
+        const backoff = MODULE_LOAD_RETRY_BASE_MS * state.moduleLoadErrorCount;
+        setStatus(`Load error – retrying in ${backoff / 1000}s…`, false, true);
+        state._retryDelay = backoff;
+      } else {
+        console.error("[OpenCC-WASM userscript] Unexpected runtime error:", err);
+        setStatus("Internal error — see console", false, true);
         clearQueue();
-        state._retryDelay = 0;
-        return;
       }
-      const backoff = MODULE_LOAD_RETRY_BASE_MS * state.moduleLoadErrorCount;
-      setStatus(`Load error – retrying in ${backoff / 1000}s…`, false, true);
-      state._retryDelay = backoff;
     } finally {
       state.processing = false;
+      if (state.enabled) startObserving();
+      if (state.processingDone_resolve) {
+        state.processingDone_resolve();
+        state.processingDone_resolve = null;
+      }
       if (state.enabled && state.queue.length) {
         const delay = state._retryDelay ?? 0;
         state._retryDelay = undefined;
@@ -499,10 +524,15 @@
     while ((node = walker.nextNode())) {
       if (state.generation !== myGeneration) break;
       const ns = nodeStates.get(node);
-      if (ns && node.isConnected && node.nodeValue !== ns.original) {
-        node.nodeValue = ns.original;
+      if (ns) {
+        if (node.isConnected && node.nodeValue !== ns.original) {
+          node.nodeValue = ns.original;
+        }
+        ns.convertedConfig = null;
+        ns.convertedText = null;
+        ns.version++;
       }
-      if (++iterCount % RESTORE_YIELD_INTERVAL === 0) await yieldToMain();
+      if (++iterCount % RESTORE_YIELD_EVERY_N_NODES === 0) await yieldToMain();
     }
     clearQueue();
   }
@@ -518,8 +548,7 @@
         stopObserving(false);
         state.enabled = false;
         storeSet("enabled", false);
-        const deadline = Date.now() + 3000;
-        while (state.processing && Date.now() < deadline) await yieldToMain();
+        if (state.processing) await state.processingDone;
         await restoreOriginals();
         setStatus("Off");
       } else {
@@ -577,11 +606,9 @@
 @keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,0.45)}50%{box-shadow:0 0 0 8px rgba(52,211,153,0)}}
 @keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-4px)}60%{transform:translateX(4px)}}
 
-/* --- Premium Material & Noise Texture --- */
 .fab::before,.panel::before{content:"";position:absolute;inset:0;border-radius:inherit;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.06'/%3E%3C/svg%3E");pointer-events:none;mix-blend-mode:overlay;z-index:1}
 .fab-inner,.header,.body,.footer,.fab-dot,.btn{position:relative;z-index:2}
 
-/* --- FAB Button --- */
 .fab{position:absolute;right:0;bottom:0;width:52px;height:52px;z-index:2;border-radius:16px;border:1px solid var(--border-strong);background:var(--bg);backdrop-filter:blur(24px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform .25s cubic-bezier(0.34,1.56,0.64,1),box-shadow .2s ease;box-shadow:0 8px 32px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,0.12),inset 0 -1px 0 rgba(0,0,0,0.3)}
 .fab:hover{transform:scale(1.08) translateY(-2px)}
 .fab:active{transform:scale(0.92)}
@@ -593,15 +620,13 @@
 .fab-dot.busy{background:var(--warning);animation:dotBlink 1.2s ease-in-out infinite}
 .fab-dot.error{background:var(--danger);animation:dotBlink 1.2s ease-in-out infinite,shake 0.5s ease-in-out}
 
-/* --- Panel Container --- */
-.panel{position:fixed;width:320px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 0 0 1px var(--primary-glow),0 24px 64px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,0.08),inset 0 0 0 1px rgba(255,255,255,0.03);overflow:hidden;opacity:1;transform:translateY(0) scale(1);transition:opacity 0.35s cubic-bezier(0.16,1,0.3,1),transform 0.55s cubic-bezier(0.34,1.8,0.64,1),box-shadow 0.4s ease,display .3s allow-discrete;position-anchor:--fab-anchor;position-area:block-end span-inline-end;position-try-fallbacks:block-end span-inline-start,block-start span-inline-end,block-start span-inline-start;margin:4px}
+.panel{width:320px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 0 0 1px var(--primary-glow),0 24px 64px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,0.08),inset 0 0 0 1px rgba(255,255,255,0.03);overflow:hidden;opacity:1;transform:translateY(0) scale(1);transition:opacity 0.35s cubic-bezier(0.16,1,0.3,1),transform 0.55s cubic-bezier(0.34,1.8,0.64,1),box-shadow 0.4s ease,display .3s allow-discrete;position:fixed;position-anchor:--fab-anchor;position-area:block-end span-inline-end;position-try-fallbacks:block-end span-inline-start,block-start span-inline-end,block-start span-inline-start;margin:4px}
 @starting-style{.panel{opacity:0;transform:translateY(24px) scale(0.92) translateZ(0);box-shadow:0 4px 12px rgba(0,0,0,0.2)}}
 .panel[hidden]{opacity:0;transform:translateY(12px) scale(0.98);display:none;pointer-events:none}
 .panel::after{content:"";position:absolute;inset:-60px;border-radius:40px;background:radial-gradient(ellipse 80% 50% at 50% 0%,var(--primary-glow),transparent 70%);opacity:0.5;pointer-events:none;z-index:-1;filter:blur(20px);transition:opacity 0.4s ease}
 .panel[hidden]::after{opacity:0}
 .panel.collapsing{opacity:0;transform:translateY(12px) scale(0.98);pointer-events:none}
 
-/* --- Header --- */
 .header{display:flex;align-items:center;gap:8px;padding:12px 14px 11px;cursor:grab;user-select:none;border-bottom:1px solid var(--border)}
 .header:active{cursor:grabbing}
 .header-dot{width:7px;height:7px;border-radius:50%;background:var(--text-3);flex-shrink:0;transition:background .3s,box-shadow .3s}
@@ -613,12 +638,10 @@
 .header-status.busy{color:var(--warning)}
 .header-status.error{color:var(--danger)}
 
-/* --- Body Layout --- */
 .body{padding:10px 0 12px;display:flex;height:200px}
 .body-left{width:78px;flex-shrink:0;display:flex;flex-direction:column;padding:0 8px;gap:4px;border-right:1px solid var(--border)}
 .categories{display:flex;flex-direction:column;gap:4px;flex:1}
 
-/* --- Category Tabs (Side Indicator Style) --- */
 .cat-btn{flex:1;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--text-3);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:all .2s cubic-bezier(0.2,0.8,0.2,1);display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1.25;text-align:center;position:relative}
 .cat-btn:hover{color:var(--text-2);background:var(--bg-card)}
 .cat-btn::before{content:"";position:absolute;left:-1px;top:20%;bottom:20%;width:3px;border-radius:2px;background:var(--cat-color);opacity:0;transform:scaleY(0.5);transition:all .25s cubic-bezier(0.34,1.56,0.64,1)}
@@ -630,7 +653,6 @@
 .cat-btn[data-cat="jp"]    {--cat-color:#ec4899;--cat-color-alpha:rgba(236,72,153,.12)}
 .cat-btn[data-cat="cngov"] {--cat-color:#6366f1;--cat-color-alpha:rgba(99,102,241,.12)}
 
-/* --- Config List (With Scroll Fade Mask) --- */
 .body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}
 .config-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;mask-image:linear-gradient(to bottom,transparent,black 16px,black calc(100% - 16px),transparent);-webkit-mask-image:linear-gradient(to bottom,transparent,black 16px,black calc(100% - 16px),transparent)}
 .config-list::-webkit-scrollbar{width:5px}
@@ -645,7 +667,6 @@
 .config-item:hover::before{opacity:0.7;transform:scaleY(1)}
 .config-item.selected{background:var(--active-cat-bg,rgba(124,106,247,.1));border-color:var(--active-cat-border,rgba(124,106,247,.25))}
 
-/* --- Radio Button (Water Drop Animation) --- */
 .config-radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--text-3);flex-shrink:0;margin-top:2px;display:flex;align-items:center;justify-content:center;transition:border-color .15s}
 .config-item.selected .config-radio{border-color:var(--primary);box-shadow:0 0 0 3px rgba(124,106,247,.15)}
 .config-radio::after{content:"";width:5px;height:5px;border-radius:50%;background:var(--primary);opacity:0;transform:scale(0);transition:transform .25s cubic-bezier(0.34,1.56,0.64,1),opacity .15s}
@@ -653,7 +674,6 @@
 .config-label{flex:1;min-width:0;font-size:13px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}
 .config-item.selected .config-label{color:var(--text-1)}
 
-/* Dynamic Active Colors for Config Items */
 .categories:has([data-cat="s2t"].active)~.body-right .config-item.selected,
 .body:has([data-cat="s2t"].active) .config-item.selected{--active-cat-bg:rgba(245,158,11,.12);--active-cat-border:rgba(245,158,11,.28)}
 .body:has([data-cat="t2s"].active) .config-item.selected{--active-cat-bg:rgba(16,185,129,.12);--active-cat-border:rgba(16,185,129,.28)}
@@ -661,7 +681,6 @@
 .body:has([data-cat="jp"].active) .config-item.selected{--active-cat-bg:rgba(236,72,153,.12);--active-cat-border:rgba(236,72,153,.28)}
 .body:has([data-cat="cngov"].active) .config-item.selected{--active-cat-bg:rgba(99,102,241,.12);--active-cat-border:rgba(99,102,241,.28)}
 
-/* --- Buttons (With Shine Effect) --- */
 .btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s,background .22s ease,border-color .22s ease;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
 .btn:hover{opacity:.9}
 .btn:active{transform:scale(0.96) translateY(1px);box-shadow:inset 0 2px 6px rgba(0,0,0,0.5),0 0 0 1px rgba(255,255,255,0.04)}
@@ -670,7 +689,6 @@
 .btn-primary{background:linear-gradient(135deg,#6d5af0,#9b6fff);border-color:rgba(150,120,255,.25);color:#fff}
 .btn-danger{background:linear-gradient(135deg,#e8415a,#f07);border-color:rgba(240,80,100,.25);color:#fff}
 
-/* --- Footer --- */
 .footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
 .footer-version{font-size:11px;color:var(--text-2);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
 .footer-hint{font-size:10px;color:var(--text-3);opacity:.45;letter-spacing:.03em}
@@ -879,12 +897,14 @@
     }
 
 
-    window.addEventListener("resize", () => requestAnimationFrame(() => {
+    const resizeHandler = () => requestAnimationFrame(() => {
       cachedHostW = state.ui.host.offsetWidth;
       cachedHostH = state.ui.host.offsetHeight;
       const rect = state.ui.host.getBoundingClientRect();
       applyPosition(rect.left, rect.top);
-    }));
+    });
+    window.addEventListener("resize", resizeHandler);
+    state.ui.resizeHandler = resizeHandler;
 
     function startDrag(clientX, clientY) {
       moved = false;
