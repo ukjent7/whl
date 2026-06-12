@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      5.2.0
+// @version      5.2.2
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -22,7 +22,7 @@
   const CONVERT_CHUNK_SIZE = 300;
   const RESTORE_YIELD_EVERY_N_NODES = 300;
   const PROCESS_DEBOUNCE_MS = 80;
-  const FULL_SCAN_DEBOUNCE_MS = 60;
+  const FULL_SCAN_DEBOUNCE_MS = 100;
   const MIN_FULL_SCAN_DELAY_MS = 16;
   const MAX_CONVERTER_ERRORS = 5;
   const CONVERTER_ERROR_COOLDOWN_MS = 200;
@@ -286,7 +286,7 @@
     while ((node = walker.nextNode())) {
       const ns = nodeStates.get(node);
       if (!ns) continue;
-      if (!shouldProcessTextNode(node)) continue;
+      if (!shouldProcessTextNode(node) && !(ns.original && HAS_HAN.test(ns.original))) continue;
       if (ns.convertedConfig === state.config && node.nodeValue === ns.convertedText) continue;
       if (!state.queuedNodes.has(node)) {
         state.queuedNodes.add(node);
@@ -411,7 +411,7 @@
         await yieldToMain();
       }
 
-      if (state.enabled) {
+      if (state.enabled && state.generation === myGeneration && state.config === myConfig) {
         const pending = observer.takeRecords();
         if (pending.length) handleMutations(pending);
       }
@@ -433,6 +433,7 @@
         }
         const backoff = MODULE_LOAD_RETRY_BASE_MS * state.moduleLoadErrorCount;
         setStatus(`Load error – retrying in ${backoff / 1000}s…`, false, true);
+        clearQueue();
         state._retryDelay = backoff;
       } else {
         console.error("[OpenCC-WASM userscript] Unexpected runtime error:", err);
@@ -446,11 +447,15 @@
         state.processingDone_resolve();
         state.processingDone_resolve = null;
       }
-      if (state.enabled && state.queue.length) {
+      if (state.enabled) {
         const delay = state._retryDelay ?? 0;
         state._retryDelay = undefined;
-        scheduleProcess(delay);
-      } else if (!state.enabled) {
+        if (delay > 0) {
+          scheduleFullScan(delay);
+        } else if (state.queue.length) {
+          scheduleProcess(0);
+        }
+      } else {
         clearQueue();
       }
     }
@@ -462,6 +467,7 @@
     for (const mutation of mutations) {
       if (mutation.type === "characterData") {
         const node = mutation.target;
+        if (!node.isConnected) { nodeStates.delete(node); continue; }
         if (shouldProcessTextNode(node)) {
           const ns = nodeStates.get(node);
           if (ns) {
@@ -963,8 +969,8 @@
 
     state.ui.fab.addEventListener("pointerdown", startPointerDrag);
     state.ui.header.addEventListener("pointerdown", startPointerDrag);
-    state.ui.host.addEventListener("pointermove",   onPointerMove);
-    state.ui.host.addEventListener("pointerup",     endPointerDrag);
+    state.ui.host.addEventListener("pointermove", onPointerMove);
+    state.ui.host.addEventListener("pointerup", endPointerDrag);
     state.ui.host.addEventListener("pointercancel", endPointerDrag);
   }
 
