@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         OpenCC-WASM Webpage Converter (Premium UI)
+// @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      5.1.0
-// @description  Convert webpage Chinese text using opencc-wasm with premium glassmorphism UI.
+// @version      5.2.0
+// @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
 // @match        https://baijiahao.baidu.com/*
@@ -15,7 +15,8 @@
 (function () {
   "use strict";
 
-  const OPENCC_ESM_URL = "https://cdn.jsdelivr.net/npm/opencc-wasm@0.8.2/dist/esm/index.js";
+  const OPENCC_LIB_VERSION = "0.8.2";
+  const OPENCC_ESM_URL = `https://cdn.jsdelivr.net/npm/opencc-wasm@${OPENCC_LIB_VERSION}/dist/esm/index.js`;
   const DEFAULT_CONFIG = "t2s";
   const DEFAULT_ENABLED = true;
   const CONVERT_CHUNK_SIZE = 300;
@@ -24,7 +25,7 @@
   const FULL_SCAN_DEBOUNCE_MS = 60;
   const MIN_FULL_SCAN_DELAY_MS = 16;
   const MAX_CONVERTER_ERRORS = 5;
-  const CONVERTER_RETRY_BASE_MS = 200;
+  const CONVERTER_ERROR_COOLDOWN_MS = 200;
   const MAX_MODULE_LOAD_ERRORS = 3;
   const MODULE_LOAD_RETRY_BASE_MS = 2000;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
@@ -167,8 +168,6 @@
         }
         return openccModule;
       }).catch(err => {
-        openccModulePromise = null;
-        openccModule = null;
         const e = new Error(`Failed to load OpenCC module: ${err?.message ?? err}`);
         e.kind = "module_load";
         throw e;
@@ -269,7 +268,19 @@
 
   function requeueForConfigChange() {
     if (!document.body) return 0;
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+      {
+        acceptNode(node) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_SKIP;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
     let node;
     let count = 0;
     while ((node = walker.nextNode())) {
@@ -372,7 +383,7 @@
               state.converterErrorCount = 0;
               return;
             }
-            await new Promise(resolve => setTimeout(resolve, CONVERTER_RETRY_BASE_MS * state.converterErrorCount));
+            await new Promise(resolve => setTimeout(resolve, CONVERTER_ERROR_COOLDOWN_MS * state.converterErrorCount));
             continue;
           }
           converted.push({ item, result });
@@ -380,8 +391,7 @@
 
         if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
 
-        try {
-          for (const { item, result } of converted) {
+        for (const { item, result } of converted) {
             if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
             const currentState = nodeStates.get(item.node);
             if (currentState !== item.state || item.state.version !== item.version) {
@@ -398,8 +408,6 @@
             item.state.convertedConfig = myConfig;
             item.state.convertedText = convertedText;
           }
-        } finally {
-        }
         await yieldToMain();
       }
 
@@ -415,11 +423,12 @@
       const isModuleError = err?.kind === "module_load" || !openccModule;
       if (isModuleError) {
         console.error("[OpenCC-WASM userscript] Module load error:", err);
+        openccModulePromise = null;
+        openccModule = null;
         state.moduleLoadErrorCount++;
         if (state.moduleLoadErrorCount >= MAX_MODULE_LOAD_ERRORS) {
           setStatus("Load failed – reload page to retry", false, true);
           clearQueue();
-          state._retryDelay = 0;
           return;
         }
         const backoff = MODULE_LOAD_RETRY_BASE_MS * state.moduleLoadErrorCount;
@@ -725,7 +734,7 @@
     );
 
     const footer = el("div", { className: "footer" },
-      el("span", { className: "footer-version" }, "opencc-wasm 0.8.2"),
+      el("span", { className: "footer-version" }, `opencc-wasm ${OPENCC_LIB_VERSION}`),
       el("span", { className: "footer-hint" }, "拖拽移动"),
     );
 
@@ -932,25 +941,31 @@
       }
     }
 
-    function onMouseMove(e) { onMoveLogic(e.clientX, e.clientY); }
-    function onMouseUp() {
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-      state.ui.host.classList.remove("dragging");
-      onUpLogic();
+    function onPointerMove(e) {
+      if (!state.ui.host.hasPointerCapture(e.pointerId)) return;
+      onMoveLogic(e.clientX, e.clientY);
     }
 
-    function startMouseDrag(e) {
+    function endPointerDrag(e) {
+      if (!state.ui.host.hasPointerCapture(e.pointerId)) return;
+      state.ui.host.releasePointerCapture(e.pointerId);
+      state.ui.host.classList.remove("dragging");
+      if (e.type === "pointerup") onUpLogic();
+    }
+
+    function startPointerDrag(e) {
       if (e.button !== 0) return;
       startDrag(e.clientX, e.clientY);
-      document.addEventListener("mousemove", onMouseMove);
-      document.addEventListener("mouseup", onMouseUp);
+      state.ui.host.setPointerCapture(e.pointerId);
       state.ui.host.classList.add("dragging");
       e.preventDefault();
     }
 
-    state.ui.fab.addEventListener("mousedown", startMouseDrag);
-    state.ui.header.addEventListener("mousedown", startMouseDrag);
+    state.ui.fab.addEventListener("pointerdown", startPointerDrag);
+    state.ui.header.addEventListener("pointerdown", startPointerDrag);
+    state.ui.host.addEventListener("pointermove",   onPointerMove);
+    state.ui.host.addEventListener("pointerup",     endPointerDrag);
+    state.ui.host.addEventListener("pointercancel", endPointerDrag);
   }
 
 })();
