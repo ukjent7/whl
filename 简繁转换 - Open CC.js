@@ -85,7 +85,7 @@
   ? () => scheduler.yield()
   : () => new Promise(r => {
       const { port1, port2 } = new MessageChannel();
-      port1.onmessage = (e) => { port1.close(); port2.close(); r(e); };
+      port1.onmessage = () => { port1.close(); port2.close(); r(); };
       port2.postMessage(null);
     });
 
@@ -188,7 +188,9 @@
     })();
     converterCache.set(configName, buildPromise);
     try {
-      return await buildPromise;
+      const converter = await buildPromise;
+      converterCache.set(configName, Promise.resolve(converter));
+      return converter;
     } catch (err) {
       converterCache.delete(configName);
       const e = new Error(`Failed to build converter for '${configName}': ${err?.message ?? err}`);
@@ -358,9 +360,9 @@
       if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
       const convertedText = String(result);
       try {
-        if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
         item.state.convertedConfig = myConfig;
         item.state.convertedText = convertedText;
+        if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
       } catch (err) {
         console.warn("[OpenCC-WASM userscript] Failed to write converted text:", err);
         nodeStates.delete(item.node);
@@ -482,7 +484,6 @@
         }
         const backoff = MODULE_LOAD_RETRY_BASE_MS * state.moduleLoadErrorCount;
         setStatus(`Load error – retrying in ${backoff / 1000}s…`, false, true);
-        clearQueue();
         state._retryDelay = backoff;
       } else {
         console.error("[OpenCC-WASM userscript] Unexpected runtime error:", err);
@@ -603,9 +604,9 @@
     try {
       if (!nextEnabled) {
         stopObserving(false);
+        if (state.processing) await state.processingDone;
         state.enabled = false;
         storeSet("enabled", false);
-        if (state.processing) await state.processingDone;
         await restoreOriginals();
         setStatus("Off");
       } else {
