@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      5.5.0
+// @version      5.5.5
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -163,6 +163,22 @@
     }
   }
 
+  async function walkAllNodes(walker, visit) {
+    if (!walker || typeof walker.nextNode !== "function") return;
+    let node;
+    try {
+      while ((node = walker.nextNode()) !== null) {
+        try {
+          if ((await visit(node)) === false) return;
+        } catch (err) {
+          console.warn("[OpenCC-WASM userscript] TreeWalker visit failed:", err);
+        }
+      }
+    } catch (err) {
+      console.warn("[OpenCC-WASM userscript] TreeWalker iteration aborted:", err);
+    }
+  }
+
   async function getConverter(configName) {
     if (!openccModulePromise) {
       openccModulePromise = import(OPENCC_ESM_URL).then(mod => {
@@ -260,14 +276,14 @@
         }
       }
     );
-    for (const node of walker) {
+    walkAllNodes(walker, (node) => {
       rememberOriginal(node, resetOriginal);
       if (!state.queuedNodes.has(node)) {
         state.queuedNodes.add(node);
         state.queue.push(node);
         count++;
       }
-    }
+    });
     return count;
   }
 
@@ -287,20 +303,20 @@
       }
     );
     let count = 0;
-    for (const node of walker) {
+    walkAllNodes(walker, (node) => {
       const ns = nodeStates.get(node);
-      if (!ns) continue;
+      if (!ns) return;
       const needsProcess = shouldProcessTextNode(node)
         || (ns.original && HAS_HAN.test(ns.original))
         || ns.convertedText !== null;
-      if (!needsProcess) continue;
-      if (ns.convertedConfig === state.config && node.nodeValue === ns.convertedText) continue;
+      if (!needsProcess) return;
+      if (ns.convertedConfig === state.config && node.nodeValue === ns.convertedText) return;
       if (!state.queuedNodes.has(node)) {
         state.queuedNodes.add(node);
         state.queue.push(node);
         count++;
       }
-    }
+    });
     return count;
   }
 
@@ -555,19 +571,21 @@
       }
     );
     let iterCount = 0;
-    for (const node of walker) {
-      if (state.generation !== myGeneration) break;
+    await walkAllNodes(walker, (node) => {
+      if (state.generation !== myGeneration) return false;
       const ns = nodeStates.get(node);
       if (ns) {
         if (node.isConnected && node.nodeValue !== ns.original) {
-          node.nodeValue = ns.original;
+          try { node.nodeValue = ns.original; }
+          catch (err) { console.warn("[OpenCC-WASM userscript] restoreOriginals write failed:", err); }
         }
         ns.convertedConfig = null;
         ns.convertedText = null;
         ns.version++;
       }
-      if (++iterCount % RESTORE_YIELD_EVERY_N_NODES === 0) await yieldToMain();
-    }
+      if (++iterCount % RESTORE_YIELD_EVERY_N_NODES === 0) return yieldToMain();
+      return undefined;
+    });
     clearQueue();
   }
 
