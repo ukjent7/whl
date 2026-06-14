@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      5.3.2
+// @version      5.3.3
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -84,7 +84,7 @@
   ? () => scheduler.yield()
   : () => new Promise(r => {
       const { port1, port2 } = new MessageChannel();
-      port1.onmessage = r;
+      port1.onmessage = (e) => { port1.close(); port2.close(); r(e); };
       port2.postMessage(null);
     });
 
@@ -183,15 +183,17 @@
       const converter = openccModule.Converter({ config: configName });
       await converter(WARMUP_TEXT);
       return converter;
-    })().catch(err => {
+    })();
+    converterCache.set(configName, buildPromise);
+    try {
+      return await buildPromise;
+    } catch (err) {
       converterCache.delete(configName);
       const e = new Error(`Failed to build converter for '${configName}': ${err?.message ?? err}`);
       e.kind = "converter_init";
       e.config = configName;
       throw e;
-    });
-    converterCache.set(configName, buildPromise);
-    return buildPromise;
+    }
   }
 
   function shouldSkipElement(el) {
@@ -288,7 +290,10 @@
     for (const node of walker) {
       const ns = nodeStates.get(node);
       if (!ns) continue;
-      if (!shouldProcessTextNode(node) && !(ns.original && HAS_HAN.test(ns.original))) continue;
+      const needsProcess = shouldProcessTextNode(node)
+        || (ns.original && HAS_HAN.test(ns.original))
+        || ns.convertedText !== null;
+      if (!needsProcess) continue;
       if (ns.convertedConfig === state.config && node.nodeValue === ns.convertedText) continue;
       if (!state.queuedNodes.has(node)) {
         state.queuedNodes.add(node);
@@ -400,6 +405,7 @@
 
         if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
 
+        stopObserving(false);
         for (const { item, result } of converted) {
             if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
             const currentState = nodeStates.get(item.node);
@@ -417,6 +423,7 @@
             item.state.convertedConfig = myConfig;
             item.state.convertedText = convertedText;
           }
+        if (state.enabled && state.generation === myGeneration && state.config === myConfig) startObserving();
         await yieldToMain();
       }
 
@@ -536,7 +543,6 @@
         acceptNode(node) {
           if (node.nodeType === Node.ELEMENT_NODE) {
             if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
-            if (!node.checkVisibility({ visibilityProperty: true })) return NodeFilter.FILTER_REJECT;
             return NodeFilter.FILTER_SKIP;
           }
           if (!nodeStates.has(node)) return NodeFilter.FILTER_SKIP;
@@ -596,7 +602,7 @@
 
   function setConfig(nextConfig) {
     if (!CONFIG_VALUES.has(nextConfig)) return;
-    if (state.toggling) {
+    if (state.toggling || state.processing) {
       state.pendingConfig = nextConfig;
       return;
     }
