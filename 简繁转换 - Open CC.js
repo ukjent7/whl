@@ -285,8 +285,6 @@
             if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
             return NodeFilter.FILTER_SKIP;
           }
-          // Only nodes we previously touched can need requeue; skip the rest
-          // without calling acceptNode() work in the loop body.
           if (!nodeStates.has(node)) return NodeFilter.FILTER_SKIP;
           return NodeFilter.FILTER_ACCEPT;
         }
@@ -345,10 +343,6 @@
     }, delay);
   }
 
-  // Apply already-computed conversion results to the DOM. Caller is expected
-  // to have stopped observing (to avoid self-mutation loops) and to restart it
-  // afterwards. Stale results (node version changed, config switched, node
-  // disconnected) are skipped and re-queued where appropriate.
   function writeConverted(converted, myGeneration, myConfig) {
     for (const { item, result } of converted) {
       if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
@@ -430,9 +424,6 @@
             item.state.errorCount = (item.state.errorCount || 0) + 1;
             state.converterErrorCount++;
             console.error("[OpenCC-WASM userscript] Conversion failed:", err);
-            // Give up on a node that consistently throws so it doesn't loop
-            // forever being requeued every processing cycle. Original text is
-            // left intact and the node stays in nodeStates (unconverted).
             if (item.state.errorCount >= MAX_NODE_CONVERT_ERRORS) {
               console.warn("[OpenCC-WASM userscript] Skipping node after repeated failures:", item.node.nodeValue);
               continue;
@@ -442,8 +433,6 @@
               state.queue.push(item.node);
             }
             if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
-              // Don't discard nodes that already converted successfully this
-              // chunk — flush them before bailing out.
               if (converted.length) {
                 stopObserving(false);
                 writeConverted(converted, myGeneration, myConfig);
@@ -622,8 +611,6 @@
       } else {
         state.enabled = true;
         storeSet("enabled", true);
-        // Re-arm after a previous permanent-load failure: a manual toggle is a
-        // good signal to retry the CDN import from scratch.
         state.loadDisabled = false;
         setStatus(STATUS_ON_PREFIX + state.config, true);
         startObserving();
@@ -643,9 +630,6 @@
 
   function setConfig(nextConfig) {
     if (!CONFIG_VALUES.has(nextConfig)) return;
-    // Only defer during the async enable/disable toggle; in-flight conversions
-    // are already cancelled/superseded by generation++ + clearQueue() below, so
-    // deferring on state.processing would silently drop the user's selection.
     if (state.toggling) {
       state.pendingConfig = nextConfig;
       return;
