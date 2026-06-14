@@ -262,7 +262,8 @@
         }
       }
     );
-    for (const node of walker) {
+    let node;
+    while ((node = walker.nextNode())) {
       rememberOriginal(node, resetOriginal);
       if (!state.queuedNodes.has(node)) {
         state.queuedNodes.add(node);
@@ -292,7 +293,8 @@
       }
     );
     let count = 0;
-    for (const node of walker) {
+    let node;
+    while ((node = walker.nextNode())) {
       const ns = nodeStates.get(node);
       if (!ns) continue;
       const needsProcess = shouldProcessTextNode(node)
@@ -586,7 +588,8 @@
       }
     );
     let iterCount = 0;
-    for (const node of walker) {
+    let node;
+    while ((node = walker.nextNode())) {
       if (state.generation !== myGeneration) break;
       const ns = nodeStates.get(node);
       if (ns) {
