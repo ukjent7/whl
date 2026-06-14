@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      5.5.5
+// @version      5.5.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -26,6 +26,7 @@
   const MIN_FULL_SCAN_DELAY_MS = 16;
   const MAX_CONVERTER_ERRORS = 5;
   const CONVERTER_ERROR_COOLDOWN_MS = 200;
+  const MAX_NODE_CONVERT_ERRORS = 2;
   const MAX_MODULE_LOAD_ERRORS = 3;
   const MODULE_LOAD_RETRY_BASE_MS = 2000;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
@@ -103,6 +104,7 @@
     converterErrorCount:    0,
     moduleLoadErrorCount:   0,
     pendingConfig:       null,
+    loadDisabled:        false,
     status:              { text: "", busy: false, error: false },
     ui:                  null,
     _retryDelay:         undefined,
@@ -163,22 +165,6 @@
     }
   }
 
-  async function walkAllNodes(walker, visit) {
-    if (!walker || typeof walker.nextNode !== "function") return;
-    let node;
-    try {
-      while ((node = walker.nextNode()) !== null) {
-        try {
-          if ((await visit(node)) === false) return;
-        } catch (err) {
-          console.warn("[OpenCC-WASM userscript] TreeWalker visit failed:", err);
-        }
-      }
-    } catch (err) {
-      console.warn("[OpenCC-WASM userscript] TreeWalker iteration aborted:", err);
-    }
-  }
-
   async function getConverter(configName) {
     if (!openccModulePromise) {
       openccModulePromise = import(OPENCC_ESM_URL).then(mod => {
@@ -229,7 +215,7 @@
   function rememberOriginal(node, resetOriginal = false) {
     let entry = nodeStates.get(node);
     if (!entry) {
-      entry = { original: node.nodeValue, version: INITIAL_NODE_VERSION, convertedConfig: null, convertedText: null };
+      entry = { original: node.nodeValue, version: INITIAL_NODE_VERSION, convertedConfig: null, convertedText: null, errorCount: 0 };
       nodeStates.set(node, entry);
     } else if (resetOriginal) {
       entry.original = node.nodeValue;
@@ -276,14 +262,14 @@
         }
       }
     );
-    walkAllNodes(walker, (node) => {
+    for (const node of walker) {
       rememberOriginal(node, resetOriginal);
       if (!state.queuedNodes.has(node)) {
         state.queuedNodes.add(node);
         state.queue.push(node);
         count++;
       }
-    });
+    }
     return count;
   }
 
@@ -298,32 +284,35 @@
             if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
             return NodeFilter.FILTER_SKIP;
           }
+          // Only nodes we previously touched can need requeue; skip the rest
+          // without calling acceptNode() work in the loop body.
+          if (!nodeStates.has(node)) return NodeFilter.FILTER_SKIP;
           return NodeFilter.FILTER_ACCEPT;
         }
       }
     );
     let count = 0;
-    walkAllNodes(walker, (node) => {
+    for (const node of walker) {
       const ns = nodeStates.get(node);
-      if (!ns) return;
+      if (!ns) continue;
       const needsProcess = shouldProcessTextNode(node)
         || (ns.original && HAS_HAN.test(ns.original))
         || ns.convertedText !== null;
-      if (!needsProcess) return;
-      if (ns.convertedConfig === state.config && node.nodeValue === ns.convertedText) return;
+      if (!needsProcess) continue;
+      if (ns.convertedConfig === state.config && node.nodeValue === ns.convertedText) continue;
       if (!state.queuedNodes.has(node)) {
         state.queuedNodes.add(node);
         state.queue.push(node);
         count++;
       }
-    });
+    }
     return count;
   }
 
   function clearQueue() { state.queue = []; state.queuedNodes = new WeakSet(); }
 
   function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
-    if (!state.enabled) return;
+    if (!state.enabled || state.loadDisabled) return;
     if (state.fullScanTimer) { clearTimeout(state.fullScanTimer); state.fullScanTimer = 0; }
     state.fullScanTimer = setTimeout(() => {
       state.fullScanTimer = 0;
@@ -342,7 +331,7 @@
   }
 
   function scheduleProcess(delay = PROCESS_DEBOUNCE_MS) {
-    if (!state.enabled) return;
+    if (!state.enabled || state.loadDisabled) return;
     if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
     state.processTimer = setTimeout(() => {
       state.processTimer = 0;
@@ -352,6 +341,35 @@
         void processQueue();
       }
     }, delay);
+  }
+
+  // Apply already-computed conversion results to the DOM. Caller is expected
+  // to have stopped observing (to avoid self-mutation loops) and to restart it
+  // afterwards. Stale results (node version changed, config switched, node
+  // disconnected) are skipped and re-queued where appropriate.
+  function writeConverted(converted, myGeneration, myConfig) {
+    for (const { item, result } of converted) {
+      if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
+      const currentState = nodeStates.get(item.node);
+      if (currentState !== item.state || item.state.version !== item.version) {
+        if (item.node.isConnected && shouldProcessTextNode(item.node)
+            && !state.queuedNodes.has(item.node)) {
+          state.queuedNodes.add(item.node);
+          state.queue.push(item.node);
+        }
+        continue;
+      }
+      if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
+      const convertedText = String(result);
+      try {
+        if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
+        item.state.convertedConfig = myConfig;
+        item.state.convertedText = convertedText;
+      } catch (err) {
+        console.warn("[OpenCC-WASM userscript] Failed to write converted text:", err);
+        nodeStates.delete(item.node);
+      }
+    }
   }
 
   async function processQueue() {
@@ -407,13 +425,28 @@
             result = await converter(item.original);
             state.converterErrorCount = 0;
           } catch (err) {
+            item.state.errorCount = (item.state.errorCount || 0) + 1;
             state.converterErrorCount++;
             console.error("[OpenCC-WASM userscript] Conversion failed:", err);
+            // Give up on a node that consistently throws so it doesn't loop
+            // forever being requeued every processing cycle. Original text is
+            // left intact and the node stays in nodeStates (unconverted).
+            if (item.state.errorCount >= MAX_NODE_CONVERT_ERRORS) {
+              console.warn("[OpenCC-WASM userscript] Skipping node after repeated failures:", item.node.nodeValue);
+              continue;
+            }
             if (!state.queuedNodes.has(item.node)) {
               state.queuedNodes.add(item.node);
-              state.queue.unshift(item.node);
+              state.queue.push(item.node);
             }
             if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
+              // Don't discard nodes that already converted successfully this
+              // chunk — flush them before bailing out.
+              if (converted.length) {
+                stopObserving(false);
+                writeConverted(converted, myGeneration, myConfig);
+                if (state.enabled && state.generation === myGeneration && state.config === myConfig) startObserving();
+              }
               setStatus("Conversion failed", false, true);
               clearQueue();
               state.converterErrorCount = 0;
@@ -428,28 +461,7 @@
         if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
 
         stopObserving(false);
-        for (const { item, result } of converted) {
-            if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
-            const currentState = nodeStates.get(item.node);
-            if (currentState !== item.state || item.state.version !== item.version) {
-              if (item.node.isConnected && shouldProcessTextNode(item.node)
-                  && !state.queuedNodes.has(item.node)) {
-                state.queuedNodes.add(item.node);
-                state.queue.push(item.node);
-              }
-              continue;
-            }
-            if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
-            const convertedText = String(result);
-            try {
-              if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
-              item.state.convertedConfig = myConfig;
-              item.state.convertedText = convertedText;
-            } catch (err) {
-              console.warn("[OpenCC-WASM userscript] Failed to write converted text:", err);
-              nodeStates.delete(item.node);
-            }
-          }
+        writeConverted(converted, myGeneration, myConfig);
         if (state.enabled && state.generation === myGeneration && state.config === myConfig) startObserving();
         await yieldToMain();
       }
@@ -472,6 +484,9 @@
         if (state.moduleLoadErrorCount >= MAX_MODULE_LOAD_ERRORS) {
           setStatus("Load failed – reload page to retry", false, true);
           clearQueue();
+          state.loadDisabled = true;
+          stopObserving(false);
+          clearScheduledTimers();
           return;
         }
         const backoff = MODULE_LOAD_RETRY_BASE_MS * state.moduleLoadErrorCount;
@@ -485,7 +500,7 @@
       }
     } finally {
       state.processing = false;
-      if (state.enabled) startObserving();
+      if (state.enabled && !state.loadDisabled) startObserving();
       if (state.processingDone_resolve) {
         state.processingDone_resolve();
         state.processingDone_resolve = null;
@@ -505,7 +520,7 @@
   }
 
   function handleMutations(mutations) {
-    if (!state.enabled) return;
+    if (!state.enabled || state.loadDisabled) return;
     let enqueued = 0;
     for (const mutation of mutations) {
       if (mutation.type === "characterData") {
@@ -571,21 +586,19 @@
       }
     );
     let iterCount = 0;
-    await walkAllNodes(walker, (node) => {
-      if (state.generation !== myGeneration) return false;
+    for (const node of walker) {
+      if (state.generation !== myGeneration) break;
       const ns = nodeStates.get(node);
       if (ns) {
         if (node.isConnected && node.nodeValue !== ns.original) {
-          try { node.nodeValue = ns.original; }
-          catch (err) { console.warn("[OpenCC-WASM userscript] restoreOriginals write failed:", err); }
+          node.nodeValue = ns.original;
         }
         ns.convertedConfig = null;
         ns.convertedText = null;
         ns.version++;
       }
-      if (++iterCount % RESTORE_YIELD_EVERY_N_NODES === 0) return yieldToMain();
-      return undefined;
-    });
+      if (++iterCount % RESTORE_YIELD_EVERY_N_NODES === 0) await yieldToMain();
+    }
     clearQueue();
   }
 
@@ -606,6 +619,9 @@
       } else {
         state.enabled = true;
         storeSet("enabled", true);
+        // Re-arm after a previous permanent-load failure: a manual toggle is a
+        // good signal to retry the CDN import from scratch.
+        state.loadDisabled = false;
         setStatus(STATUS_ON_PREFIX + state.config, true);
         startObserving();
         scheduleFullScan(0);
@@ -624,7 +640,10 @@
 
   function setConfig(nextConfig) {
     if (!CONFIG_VALUES.has(nextConfig)) return;
-    if (state.toggling || state.processing) {
+    // Only defer during the async enable/disable toggle; in-flight conversions
+    // are already cancelled/superseded by generation++ + clearQueue() below, so
+    // deferring on state.processing would silently drop the user's selection.
+    if (state.toggling) {
       state.pendingConfig = nextConfig;
       return;
     }
