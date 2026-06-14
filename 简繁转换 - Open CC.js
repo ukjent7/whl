@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      5.3.3
+// @version      5.5.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -363,7 +363,10 @@
       state.converterErrorCount = 0;
       if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) return;
 
-      while (state.enabled && state.generation === myGeneration && state.config === myConfig && state.queue.length) {
+      let didWork = true;
+      let chunkCounter = 0;
+      while (state.enabled && state.generation === myGeneration && state.config === myConfig && didWork) {
+        didWork = false;
         const chunk = [];
         while (state.queue.length && chunk.length < CONVERT_CHUNK_SIZE) {
           const node = state.queue.shift();
@@ -375,8 +378,11 @@
           chunk.push({ node, state: ns, version: ns.version, original: ns.original });
         }
         if (!chunk.length) { await yieldToMain(); continue; }
-
-        setStatus(`Converting… ${state.queue.length} left`, true);
+        didWork = true;
+        chunkCounter++;
+        if (chunkCounter % 3 === 0 || state.queue.length === 0) {
+          setStatus(`Converting… ${state.queue.length} left`, true);
+        }
         const converted = [];
         for (const item of chunk) {
           if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
@@ -419,9 +425,14 @@
             }
             if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
             const convertedText = String(result);
-            if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
-            item.state.convertedConfig = myConfig;
-            item.state.convertedText = convertedText;
+            try {
+              if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
+              item.state.convertedConfig = myConfig;
+              item.state.convertedText = convertedText;
+            } catch (err) {
+              console.warn("[OpenCC-WASM userscript] Failed to write converted text:", err);
+              nodeStates.delete(item.node);
+            }
           }
         if (state.enabled && state.generation === myGeneration && state.config === myConfig) startObserving();
         await yieldToMain();
@@ -502,13 +513,6 @@
         }
       } else if (mutation.type === "childList") {
         for (const added of mutation.addedNodes) enqueued += collectTextNodes(added, false);
-        if (mutation.removedNodes.length && state.queue.length) {
-          state.queue = state.queue.filter(n => {
-            if (n.isConnected) return true;
-            state.queuedNodes.delete(n);
-            return false;
-          });
-        }
       }
     }
     if (enqueued > 0) scheduleProcess(PROCESS_DEBOUNCE_MS);
@@ -928,6 +932,10 @@
 
 
     const resizeHandler = () => requestAnimationFrame(() => {
+      if (!state.ui || !state.ui.host.isConnected) {
+        window.removeEventListener("resize", resizeHandler);
+        return;
+      }
       cachedHostW = state.ui.host.offsetWidth;
       cachedHostH = state.ui.host.offsetHeight;
       const rect = state.ui.host.getBoundingClientRect();
