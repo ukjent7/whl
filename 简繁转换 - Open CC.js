@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      5.2.2
+// @version      5.3.2
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -81,8 +81,12 @@
   const HAS_HAN = /\p{Script=Han}/u;
 
   const yieldToMain = typeof scheduler?.yield === "function"
-    ? () => scheduler.yield()
-    : () => new Promise(r => setTimeout(r, 0));
+  ? () => scheduler.yield()
+  : () => new Promise(r => {
+      const { port1, port2 } = new MessageChannel();
+      port1.onmessage = r;
+      port2.postMessage(null);
+    });
 
   const state = {
     config:              DEFAULT_CONFIG,
@@ -254,8 +258,7 @@
         }
       }
     );
-    let node;
-    while ((node = walker.nextNode())) {
+    for (const node of walker) {
       rememberOriginal(node, resetOriginal);
       if (!state.queuedNodes.has(node)) {
         state.queuedNodes.add(node);
@@ -281,9 +284,8 @@
         }
       }
     );
-    let node;
     let count = 0;
-    while ((node = walker.nextNode())) {
+    for (const node of walker) {
       const ns = nodeStates.get(node);
       if (!ns) continue;
       if (!shouldProcessTextNode(node) && !(ns.original && HAS_HAN.test(ns.original))) continue;
@@ -321,7 +323,14 @@
   function scheduleProcess(delay = PROCESS_DEBOUNCE_MS) {
     if (!state.enabled) return;
     if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
-    state.processTimer = setTimeout(() => { state.processTimer = 0; void processQueue(); }, delay);
+    state.processTimer = setTimeout(() => {
+      state.processTimer = 0;
+      if (typeof scheduler?.postTask === "function") {
+        scheduler.postTask(() => processQueue(), { priority: "background" });
+      } else {
+        void processQueue();
+      }
+    }, delay);
   }
 
   async function processQueue() {
@@ -527,6 +536,7 @@
         acceptNode(node) {
           if (node.nodeType === Node.ELEMENT_NODE) {
             if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
+            if (!node.checkVisibility({ visibilityProperty: true })) return NodeFilter.FILTER_REJECT;
             return NodeFilter.FILTER_SKIP;
           }
           if (!nodeStates.has(node)) return NodeFilter.FILTER_SKIP;
@@ -534,9 +544,8 @@
         }
       }
     );
-    let node;
     let iterCount = 0;
-    while ((node = walker.nextNode())) {
+    for (const node of walker) {
       if (state.generation !== myGeneration) break;
       const ns = nodeStates.get(node);
       if (ns) {
