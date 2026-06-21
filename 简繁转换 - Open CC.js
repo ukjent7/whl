@@ -35,7 +35,7 @@
   const STATUS_ON_PREFIX = "On · ";
   const INITIAL_NODE_VERSION = 1;
 
-    const CONFIG_GROUPS = [
+  const CONFIG_GROUPS = [
     { id: "s2t", label: "简→繁", color: "#f59e0b", configs: [
       ["s2t", "简 → 繁体"],
       ["s2twp", "简 → 台繁 + 词汇"],
@@ -116,7 +116,7 @@
     loadDisabled:        false,
     status:              { text: "", busy: false, error: false },
     ui:                  null,
-    _retryDelay:         undefined,
+    _retryDelay:         null,
     processingDone:      Promise.resolve(),
     processingDone_resolve: null,
   };
@@ -321,7 +321,7 @@
     return count;
   }
 
-  function clearQueue() { state.queue = []; state.queuedNodes = new WeakSet(); }
+  function clearQueue() { state.queue.length = 0; state.queuedNodes = new WeakSet(); }
 
   function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
     if (!state.enabled || state.loadDisabled) return;
@@ -388,6 +388,8 @@
     state.processingDone = new Promise(r => { state.processingDone_resolve = r; });
     const myGeneration = state.generation;
     const myConfig = state.config;
+    let myQueue = state.queue;
+    let myQueuedNodes = state.queuedNodes;
     try {
       setStatus(`Loading ${myConfig}…`, true);
       let converter;
@@ -403,16 +405,19 @@
       }
       state.moduleLoadErrorCount = 0;
       state.converterErrorCount = 0;
+      state.loadDisabled = false;
       if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) return;
 
       let didWork = true;
       let chunkCounter = 0;
       while (state.enabled && state.generation === myGeneration && state.config === myConfig && didWork) {
+        myQueue = state.queue;
+        myQueuedNodes = state.queuedNodes;
         didWork = false;
         const chunk = [];
-        while (state.queue.length && chunk.length < CONVERT_CHUNK_SIZE) {
-          const node = state.queue.shift();
-          state.queuedNodes.delete(node);
+        while (myQueue.length && chunk.length < CONVERT_CHUNK_SIZE) {
+          const node = myQueue.shift();
+          myQueuedNodes.delete(node);
           if (!node.isConnected || !shouldProcessTextNode(node)) continue;
           const ns = nodeStates.get(node) || rememberOriginal(node, false);
           if (!ns.original || !HAS_HAN.test(ns.original)) continue;
@@ -422,8 +427,8 @@
         if (!chunk.length) { await yieldToMain(); continue; }
         didWork = true;
         chunkCounter++;
-        if (chunkCounter % 3 === 0 || state.queue.length === 0) {
-          setStatus(`Converting… ${state.queue.length} left`, true);
+        if (chunkCounter % 3 === 0 || myQueue.length === 0) {
+          setStatus(`Converting… ${myQueue.length} left`, true);
         }
         const converted = [];
         for (const item of chunk) {
@@ -440,9 +445,9 @@
               console.warn("[OpenCC-WASM userscript] Skipping node after repeated failures:", item.node.nodeValue);
               continue;
             }
-            if (!state.queuedNodes.has(item.node)) {
-              state.queuedNodes.add(item.node);
-              state.queue.push(item.node);
+            if (!myQueuedNodes.has(item.node)) {
+              myQueuedNodes.add(item.node);
+              myQueue.push(item.node);
             }
             if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
               if (converted.length) {
@@ -508,7 +513,7 @@
       }
       if (state.enabled) {
         const delay = state._retryDelay ?? 0;
-        state._retryDelay = undefined;
+        state._retryDelay = null;
         if (delay > 0) {
           scheduleFullScan(delay);
         } else if (state.queue.length) {
