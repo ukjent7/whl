@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      6.0.1
+// @version      6.0.5
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -35,45 +35,45 @@
   const STATUS_ON_PREFIX = "On · ";
   const INITIAL_NODE_VERSION = 1;
 
-  const CONFIG_GROUPS = [
+    const CONFIG_GROUPS = [
     { id: "s2t", label: "简→繁", color: "#f59e0b", configs: [
-      ["s2twp",       "s2twp — 简体 → 台湾繁体 + 词汇"],
-      ["s2twp_jieba", "s2twp_jieba — 简体 → 台湾繁体 + 词汇 (结巴)"],
-      ["s2tw",        "s2tw — 简体 → 台湾繁体"],
-      ["s2tw_jieba",  "s2tw_jieba — 简体 → 台湾繁体 (结巴)"],
-      ["s2hkp",       "s2hkp — 简体 → 香港繁体 + 词汇"],
-      ["s2hkp_jieba", "s2hkp_jieba — 简体 → 香港繁体 + 词汇 (结巴)"],
-      ["s2hk",        "s2hk — 简体 → 香港繁体"],
-      ["s2hk_jieba",  "s2hk_jieba — 简体 → 香港繁体 (结巴)"],
-      ["s2t",         "s2t — 简体 → 繁体"],
-      ["s2t_jieba",   "s2t_jieba — 简体 → 繁体 (结巴)"],
+      ["s2twp",       "简 → 台繁 + 词汇"],
+      ["s2tw",        "简 → 台繁"],
+      ["s2hkp",       "简 → 港繁 + 词汇"],
+      ["s2hk",        "简 → 港繁"],
+      ["s2t",         "简 → 繁体"],
+      ["s2twp_jieba", "简 → 台繁 + 词汇 (结巴)"],
+      ["s2tw_jieba",  "简 → 台繁 (结巴)"],
+      ["s2hkp_jieba", "简 → 港繁 + 词汇 (结巴)"],
+      ["s2hk_jieba",  "简 → 港繁 (结巴)"],
+      ["s2t_jieba",   "简 → 繁体 (结巴)"],
     ]},
     { id: "t2s", label: "繁→简", color: "#10b981", configs: [
-      ["tw2s",        "tw2s — 台湾繁体 → 简体"],
-      ["tw2sp",       "tw2sp — 台湾繁体 → 简体 + 词汇"],
-      ["tw2sp_jieba", "tw2sp_jieba — 台湾繁体 → 简体 + 词汇 (结巴)"],
-      ["hk2s",        "hk2s — 香港繁体 → 简体"],
-      ["hk2sp",       "hk2sp — 香港繁体 → 简体 + 词汇"],
-      ["hk2sp_jieba", "hk2sp_jieba — 香港繁体 → 简体 + 词汇 (结巴)"],
-      ["t2s",         "t2s — 繁体 → 简体"],
-      ["t2s_cngov",   "t2s_cngov — 繁体 → 国标简体"],
+      ["tw2sp",       "台繁 → 简 + 词汇"],
+      ["tw2s",        "台繁 → 简"],
+      ["hk2sp",       "港繁 → 简 + 词汇"],
+      ["hk2s",        "港繁 → 简"],
+      ["t2s",         "繁体 → 简"],
+      ["tw2sp_jieba", "台繁 → 简 + 词汇 (结巴)"],
+      ["hk2sp_jieba", "港繁 → 简 + 词汇 (结巴)"],
+      ["t2s_cngov",   "繁体 → 国标简"],
     ]},
     { id: "tw2hk", label: "繁→繁", color: "#8b5cf6", configs: [
-      ["hk2t",  "hk2t — 香港繁体 → 繁体"],
-      ["t2hk",  "t2hk — 繁体 → 香港繁体"],
-      ["tw2t",  "tw2t — 台湾繁体 → 繁体"],
-      ["t2tw",  "t2tw — 繁体 → 台湾繁体"],
+      ["t2tw",  "繁体 → 台繁"],
+      ["t2hk",  "繁体 → 港繁"],
+      ["tw2t",  "台繁 → 繁体"],
+      ["hk2t",  "港繁 → 繁体"],
     ]},
     { id: "jp", label: "日文", color: "#ec4899", configs: [
-      ["jp2t", "jp2t — 新字体 → 旧字体"],
-      ["t2jp", "t2jp — 旧字体 → 新字体"],
+      ["jp2t", "新字体 → 旧字体"],
+      ["t2jp", "旧字体 → 新字体"],
     ]},
     { id: "cngov", label: "国标", color: "#6366f1", configs: [
-      ["s2t_cngov",              "s2t_cngov — 简体 → 国标繁体"],
-      ["t2cngov",                "t2cngov — 繁体 → 国标繁体"],
-      ["t2cngov_keep_simp",      "t2cngov_keep_simp — 国标繁体 (保留简体)"],
-      ["t2cngov_jieba",          "t2cngov_jieba — 国标繁体 (结巴)"],
-      ["t2cngov_keep_simp_jieba","t2cngov_keep_simp_jieba — 国标繁体 (保留简体, 结巴)"],
+      ["s2t_cngov",              "简 → 国标繁"],
+      ["t2cngov",                "繁体 → 国标繁"],
+      ["t2cngov_keep_simp",      "国标繁 (保留简体)"],
+      ["t2cngov_jieba",          "国标繁 (结巴)"],
+      ["t2cngov_keep_simp_jieba","国标繁 (保留简体, 结巴)"],
     ]},
   ];
 
