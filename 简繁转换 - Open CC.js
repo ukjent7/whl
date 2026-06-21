@@ -872,12 +872,12 @@
         refreshControls();
       }
     };
-    document.addEventListener("pointerup", state.ui.onDocPointerUp, { capture: false });
+    document.addEventListener("pointerup", state.ui.onDocPointerUp, { capture: true });
   }
 
   function unbindOutsideClick() {
     if (!state.ui?.onDocPointerUp) return;
-    document.removeEventListener("pointerup", state.ui.onDocPointerUp, { capture: false });
+    document.removeEventListener("pointerup", state.ui.onDocPointerUp, { capture: true });
     state.ui.onDocPointerUp = null;
   }
 
@@ -930,6 +930,7 @@
       state.ui.panel.hidden = false;
       state.ui.panel.classList.remove("collapsing");
     }
+    if (state.ui.remeasureAndClamp) requestAnimationFrame(state.ui.remeasureAndClamp);
 
     state.ui.toggle.textContent = state.enabled ? "关" : "开";
     state.ui.toggle.classList.toggle("btn-danger", state.enabled);
@@ -979,16 +980,22 @@
     }
 
 
+    function remeasureAndClamp() {
+      if (!state.ui || !state.ui.host.isConnected) return;
+      cachedHostW = state.ui.host.offsetWidth || cachedHostW;
+      cachedHostH = state.ui.host.offsetHeight || cachedHostH;
+      const rect = state.ui.host.getBoundingClientRect();
+      applyPosition(rect.left, rect.top);
+    }
+
     const resizeHandler = () => requestAnimationFrame(() => {
       if (!state.ui || !state.ui.host.isConnected) {
         window.removeEventListener("resize", resizeHandler);
         return;
       }
-      cachedHostW = state.ui.host.offsetWidth;
-      cachedHostH = state.ui.host.offsetHeight;
-      const rect = state.ui.host.getBoundingClientRect();
-      applyPosition(rect.left, rect.top);
+      remeasureAndClamp();
     });
+    state.ui.remeasureAndClamp = remeasureAndClamp;
     window.addEventListener("resize", resizeHandler);
     state.ui.resizeHandler = resizeHandler;
 
