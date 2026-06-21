@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      6.0.0
+// @version      6.0.1
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -183,6 +183,7 @@
         }
         return openccModule;
       }).catch(err => {
+        openccModulePromise = null;
         const e = new Error(`Failed to load OpenCC module: ${err?.message ?? err}`);
         e.kind = "module_load";
         throw e;
@@ -306,9 +307,9 @@
     while ((node = walker.nextNode())) {
       const ns = nodeStates.get(node);
       if (!ns) continue;
-      const needsProcess = shouldProcessTextNode(node)
-        || (ns.original && HAS_HAN.test(ns.original))
-        || ns.convertedText !== null;
+      const needsProcess =
+        (ns.original && HAS_HAN.test(ns.original)) ||
+        (ns.convertedText !== null && shouldProcessTextNode(node));
       if (!needsProcess) continue;
       if (ns.convertedConfig === state.config && node.nodeValue === ns.convertedText) continue;
       if (!state.queuedNodes.has(node)) {
@@ -468,11 +469,6 @@
         await yieldToMain();
       }
 
-      if (state.enabled && state.generation === myGeneration && state.config === myConfig) {
-        const pending = observer.takeRecords();
-        if (pending.length) handleMutations(pending);
-      }
-
       if (state.enabled && state.generation === myGeneration && state.config === myConfig){
         setStatus(STATUS_ON_PREFIX + myConfig);
       }
@@ -500,6 +496,10 @@
         clearQueue();
       }
     } finally {
+      if (state.enabled && state.generation === myGeneration && state.config === myConfig) {
+        const pending = observer.takeRecords();
+        if (pending.length) handleMutations(pending);
+      }
       state.processing = false;
       if (state.enabled && !state.loadDisabled) startObserving();
       if (state.processingDone_resolve) {
@@ -589,7 +589,13 @@
     let iterCount = 0;
     let node;
     while ((node = walker.nextNode())) {
-      if (state.generation !== myGeneration) break;
+      if (state.generation !== myGeneration) {
+        do {
+          const ns = nodeStates.get(node);
+          if (ns) { ns.convertedConfig = null; ns.convertedText = null; ns.version++; }
+        } while ((node = walker.nextNode()));
+        break;
+      }
       const ns = nodeStates.get(node);
       if (ns) {
         if (node.isConnected && node.nodeValue !== ns.original) {
@@ -613,7 +619,10 @@
     try {
       if (!nextEnabled) {
         stopObserving(false);
-        if (state.processing) await state.processingDone;
+        if (state.processing) {
+          const timeout = new Promise(r => setTimeout(r, 3000));
+          await Promise.race([state.processingDone, timeout]);
+        }
         state.enabled = false;
         storeSet("enabled", false);
         await restoreOriginals();
@@ -948,8 +957,8 @@
     let cachedHostW = state.ui.host.offsetWidth || 52;
     let cachedHostH = state.ui.host.offsetHeight || 52;
     requestAnimationFrame(() => {
-      cachedHostW = state.ui.host.offsetWidth;
-      cachedHostH = state.ui.host.offsetHeight;
+      cachedHostW = state.ui.host.offsetWidth || cachedHostW;
+      cachedHostH = state.ui.host.offsetHeight || cachedHostH;
       if (savedPos && typeof savedPos.left === "number") {
         applyPosition(savedPos.left, savedPos.top);
       }
