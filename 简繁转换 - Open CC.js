@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      6.0.5
+// @version      6.1.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -15,7 +15,7 @@
 (function () {
   "use strict";
 
-  const OPENCC_LIB_VERSION = "0.9.0";
+  const OPENCC_LIB_VERSION = "0.10.0";
   const OPENCC_ESM_URL = `https://cdn.jsdelivr.net/npm/opencc-wasm@${OPENCC_LIB_VERSION}/dist/esm/index.js`;
   const DEFAULT_CONFIG = "t2s";
   const DEFAULT_ENABLED = true;
@@ -458,6 +458,7 @@
               setStatus("Conversion failed", false, true);
               clearQueue();
               state.converterErrorCount = 0;
+              converterCache.delete(myConfig);
               return;
             }
             await new Promise(resolve => setTimeout(resolve, CONVERTER_ERROR_COOLDOWN_MS * state.converterErrorCount));
