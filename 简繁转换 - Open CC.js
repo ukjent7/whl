@@ -210,6 +210,22 @@
     }
   }
 
+  function makeStructuralWalker(root, acceptText) {
+    return document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+      {
+        acceptNode(node) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_SKIP;
+          }
+          return acceptText(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+        }
+      }
+    );
+  }
+
   function shouldSkipElement(el) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
     if (el.isContentEditable) return true;
@@ -222,6 +238,13 @@
     if (!text || !HAS_HAN.test(text)) return false;
     const parent = node.parentElement;
     return Boolean(parent && !shouldSkipElement(parent));
+  }
+
+  function enqueueNode(node, queue, queuedNodes) {
+    if (queuedNodes.has(node)) return false;
+    queuedNodes.add(node);
+    queue.push(node);
+    return true;
   }
 
   function rememberOriginal(node, resetOriginal = false) {
@@ -241,12 +264,7 @@
   function enqueueTextNode(node, resetOriginal = false) {
     if (!shouldProcessTextNode(node)) return false;
     rememberOriginal(node, resetOriginal);
-    if (!state.queuedNodes.has(node)) {
-      state.queuedNodes.add(node);
-      state.queue.push(node);
-      return true;
-    }
-    return false;
+    return enqueueNode(node, state.queue, state.queuedNodes);
   }
 
   function collectTextNodes(root, resetOriginal = false) {
@@ -259,49 +277,21 @@
     ) return 0;
     if (root.nodeType === Node.ELEMENT_NODE && shouldSkipElement(root)) return 0;
     let count = 0;
-    const walker = document.createTreeWalker(
-      root,
-      NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
-      {
-        acceptNode(node) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
-            return NodeFilter.FILTER_SKIP;
-          }
-          const text = node.nodeValue;
-          if (!text || !HAS_HAN.test(text)) return NodeFilter.FILTER_SKIP;
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      }
-    );
+    const walker = makeStructuralWalker(root, (node) => {
+      const text = node.nodeValue;
+      return Boolean(text && HAS_HAN.test(text));
+    });
     let node;
     while ((node = walker.nextNode())) {
       rememberOriginal(node, resetOriginal);
-      if (!state.queuedNodes.has(node)) {
-        state.queuedNodes.add(node);
-        state.queue.push(node);
-        count++;
-      }
+      if (enqueueNode(node, state.queue, state.queuedNodes)) count++;
     }
     return count;
   }
 
   function requeueForConfigChange() {
     if (!document.body) return 0;
-    const walker = document.createTreeWalker(
-      document.body,
-      NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
-      {
-        acceptNode(node) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
-            return NodeFilter.FILTER_SKIP;
-          }
-          if (!nodeStates.has(node)) return NodeFilter.FILTER_SKIP;
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      }
-    );
+    const walker = makeStructuralWalker(document.body, (node) => nodeStates.has(node));
     let count = 0;
     let node;
     while ((node = walker.nextNode())) {
@@ -312,11 +302,7 @@
         (ns.convertedText !== null && shouldProcessTextNode(node));
       if (!needsProcess) continue;
       if (ns.convertedConfig === state.config && node.nodeValue === ns.convertedText) continue;
-      if (!state.queuedNodes.has(node)) {
-        state.queuedNodes.add(node);
-        state.queue.push(node);
-        count++;
-      }
+      if (enqueueNode(node, state.queue, state.queuedNodes)) count++;
     }
     return count;
   }
@@ -355,15 +341,17 @@
     }, delay);
   }
 
+  function isStale(myGeneration, myConfig) {
+    return !state.enabled || state.generation !== myGeneration || state.config !== myConfig;
+  }
+
   function writeConverted(converted, myGeneration, myConfig) {
     for (const { item, result } of converted) {
-      if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
+      if (isStale(myGeneration, myConfig)) break;
       const currentState = nodeStates.get(item.node);
       if (currentState !== item.state || item.state.version !== item.version) {
-        if (item.node.isConnected && shouldProcessTextNode(item.node)
-            && !state.queuedNodes.has(item.node)) {
-          state.queuedNodes.add(item.node);
-          state.queue.push(item.node);
+        if (item.node.isConnected && shouldProcessTextNode(item.node)) {
+          enqueueNode(item.node, state.queue, state.queuedNodes);
         }
         continue;
       }
@@ -380,6 +368,54 @@
     }
   }
 
+  async function loadConverterOrFail(myConfig) {
+    try {
+      return await getConverter(myConfig);
+    } catch (err) {
+      if (err?.kind === "converter_init" && err.config === myConfig) {
+        return { configFailed: true, message: err.message };
+      }
+      throw err;
+    }
+  }
+
+  async function convertChunk(chunk, converter, myQueue, myQueuedNodes, myGeneration, myConfig) {
+    const converted = [];
+    for (const item of chunk) {
+      if (isStale(myGeneration, myConfig)) break;
+      let result;
+      try {
+        result = await converter(item.original);
+        state.converterErrorCount = 0;
+      } catch (err) {
+        item.state.errorCount = (item.state.errorCount || 0) + 1;
+        state.converterErrorCount++;
+        console.error("[OpenCC-WASM userscript] Conversion failed:", err);
+        if (item.state.errorCount >= MAX_NODE_CONVERT_ERRORS) {
+          console.warn("[OpenCC-WASM userscript] Skipping node after repeated failures:", item.node.nodeValue);
+          continue;
+        }
+        enqueueNode(item.node, myQueue, myQueuedNodes);
+        if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
+          if (converted.length) {
+            stopObserving(false);
+            writeConverted(converted, myGeneration, myConfig);
+            if (!isStale(myGeneration, myConfig)) startObserving();
+          }
+          setStatus("Conversion failed", false, true);
+          clearQueue();
+          state.converterErrorCount = 0;
+          converterCache.delete(myConfig);
+          return { fatal: true };
+        }
+        await new Promise(resolve => setTimeout(resolve, CONVERTER_ERROR_COOLDOWN_MS * state.converterErrorCount));
+        continue;
+      }
+      converted.push({ item, result });
+    }
+    return { converted };
+  }
+
   async function processQueue() {
     if (state.processing || !state.enabled) return;
     if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
@@ -392,25 +428,20 @@
     let myQueuedNodes = state.queuedNodes;
     try {
       setStatus(`Loading ${myConfig}…`, true);
-      let converter;
-      try {
-        converter = await getConverter(myConfig);
-      } catch (err) {
-        if (err?.kind === "converter_init" && err.config === myConfig) {
-          setStatus(`Config '${myConfig}' failed – ${err.message}`, false, true);
-          clearQueue();
-          return;
-        }
-        throw err;
+      const converter = await loadConverterOrFail(myConfig);
+      if (converter?.configFailed) {
+        setStatus(`Config '${myConfig}' failed – ${converter.message}`, false, true);
+        clearQueue();
+        return;
       }
       state.moduleLoadErrorCount = 0;
       state.converterErrorCount = 0;
       state.loadDisabled = false;
-      if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) return;
+      if (isStale(myGeneration, myConfig)) return;
 
       let didWork = true;
       let chunkCounter = 0;
-      while (state.enabled && state.generation === myGeneration && state.config === myConfig && didWork) {
+      while (!isStale(myGeneration, myConfig) && didWork) {
         myQueue = state.queue;
         myQueuedNodes = state.queuedNodes;
         didWork = false;
@@ -430,52 +461,20 @@
         if (chunkCounter % 3 === 0 || myQueue.length === 0) {
           setStatus(`Converting… ${myQueue.length} left`, true);
         }
-        const converted = [];
-        for (const item of chunk) {
-          if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
-          let result;
-          try {
-            result = await converter(item.original);
-            state.converterErrorCount = 0;
-          } catch (err) {
-            item.state.errorCount = (item.state.errorCount || 0) + 1;
-            state.converterErrorCount++;
-            console.error("[OpenCC-WASM userscript] Conversion failed:", err);
-            if (item.state.errorCount >= MAX_NODE_CONVERT_ERRORS) {
-              console.warn("[OpenCC-WASM userscript] Skipping node after repeated failures:", item.node.nodeValue);
-              continue;
-            }
-            if (!myQueuedNodes.has(item.node)) {
-              myQueuedNodes.add(item.node);
-              myQueue.push(item.node);
-            }
-            if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
-              if (converted.length) {
-                stopObserving(false);
-                writeConverted(converted, myGeneration, myConfig);
-                if (state.enabled && state.generation === myGeneration && state.config === myConfig) startObserving();
-              }
-              setStatus("Conversion failed", false, true);
-              clearQueue();
-              state.converterErrorCount = 0;
-              converterCache.delete(myConfig);
-              return;
-            }
-            await new Promise(resolve => setTimeout(resolve, CONVERTER_ERROR_COOLDOWN_MS * state.converterErrorCount));
-            continue;
-          }
-          converted.push({ item, result });
-        }
+        const { converted, fatal } = await convertChunk(
+          chunk, converter, myQueue, myQueuedNodes, myGeneration, myConfig
+        );
+        if (fatal) return;
 
-        if (!state.enabled || state.generation !== myGeneration || state.config !== myConfig) break;
+        if (isStale(myGeneration, myConfig)) break;
 
         stopObserving(false);
         writeConverted(converted, myGeneration, myConfig);
-        if (state.enabled && state.generation === myGeneration && state.config === myConfig) startObserving();
+        if (!isStale(myGeneration, myConfig)) startObserving();
         await yieldToMain();
       }
 
-      if (state.enabled && state.generation === myGeneration && state.config === myConfig){
+      if (!isStale(myGeneration, myConfig)){
         setStatus(STATUS_ON_PREFIX + myConfig);
       }
     } catch (err) {
@@ -502,7 +501,7 @@
         clearQueue();
       }
     } finally {
-      if (state.enabled && state.generation === myGeneration && state.config === myConfig) {
+      if (!isStale(myGeneration, myConfig)) {
         const pending = observer.takeRecords();
         if (pending.length) handleMutations(pending);
       }
@@ -538,11 +537,7 @@
           if (ns) {
             if (node.nodeValue === ns.convertedText) continue;
             rememberOriginal(node, true);
-            if (!state.queuedNodes.has(node)) {
-              state.queuedNodes.add(node);
-              state.queue.push(node);
-              enqueued++;
-            }
+            if (enqueueNode(node, state.queue, state.queuedNodes)) enqueued++;
           } else {
             if (enqueueTextNode(node, true)) enqueued++;
           }
@@ -578,20 +573,7 @@
     clearScheduledTimers();
     stopObserving(true);
     const myGeneration = state.generation;
-    const walker = document.createTreeWalker(
-      document.body,
-      NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
-      {
-        acceptNode(node) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
-            return NodeFilter.FILTER_SKIP;
-          }
-          if (!nodeStates.has(node)) return NodeFilter.FILTER_SKIP;
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      }
-    );
+    const walker = makeStructuralWalker(document.body, (node) => nodeStates.has(node));
     let iterCount = 0;
     let node;
     while ((node = walker.nextNode())) {
@@ -673,6 +655,27 @@
     } else setStatus("Off");
   }
 
+  function hexToRgba(hex, alpha) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+
+  function buildCategoryColorCSS() {
+    const tabRules = CONFIG_GROUPS.map(g =>
+      `.cat-btn[data-cat="${g.id}"]{--cat-color:${g.color};--cat-color-alpha:${hexToRgba(g.color, .12)}}`
+    ).join("\n");
+    const selectionRules = CONFIG_GROUPS.map((g, i) => {
+      const decl = `--active-cat-bg:${hexToRgba(g.color, .12)};--active-cat-border:${hexToRgba(g.color, .28)}`;
+      const prefix = i === 0
+        ? `.categories:has([data-cat="${g.id}"].active)~.body-right .config-item.selected,\n`
+        : "";
+      return `${prefix}.body:has([data-cat="${g.id}"].active) .config-item.selected{${decl}}`;
+    }).join("\n");
+    return `${tabRules}\n${selectionRules}`;
+  }
+
   function createPanel() {
     if (document.getElementById(PANEL_ID)) return;
     const host = document.createElement("div");
@@ -730,11 +733,7 @@
 .cat-btn::before{content:"";position:absolute;left:-1px;top:20%;bottom:20%;width:3px;border-radius:2px;background:var(--cat-color);opacity:0;transform:scaleY(0.5);transition:all .25s cubic-bezier(0.34,1.56,0.64,1)}
 .cat-btn.active{color:var(--text-1);background:var(--cat-color-alpha)}
 .cat-btn.active::before{opacity:1;transform:scaleY(1)}
-.cat-btn[data-cat="s2t"]   {--cat-color:#f59e0b;--cat-color-alpha:rgba(245,158,11,.12)}
-.cat-btn[data-cat="t2s"]   {--cat-color:#10b981;--cat-color-alpha:rgba(16,185,129,.12)}
-.cat-btn[data-cat="tw2hk"] {--cat-color:#8b5cf6;--cat-color-alpha:rgba(139,92,246,.12)}
-.cat-btn[data-cat="jp"]    {--cat-color:#ec4899;--cat-color-alpha:rgba(236,72,153,.12)}
-.cat-btn[data-cat="cngov"] {--cat-color:#6366f1;--cat-color-alpha:rgba(99,102,241,.12)}
+${buildCategoryColorCSS()}
 
 .body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}
 .config-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;mask-image:linear-gradient(to bottom,transparent,black 16px,black calc(100% - 16px),transparent);-webkit-mask-image:linear-gradient(to bottom,transparent,black 16px,black calc(100% - 16px),transparent)}
@@ -756,13 +755,6 @@
 .config-item.selected .config-radio::after{opacity:1;transform:scale(1)}
 .config-label{flex:1;min-width:0;font-size:13px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}
 .config-item.selected .config-label{color:var(--text-1)}
-
-.categories:has([data-cat="s2t"].active)~.body-right .config-item.selected,
-.body:has([data-cat="s2t"].active) .config-item.selected{--active-cat-bg:rgba(245,158,11,.12);--active-cat-border:rgba(245,158,11,.28)}
-.body:has([data-cat="t2s"].active) .config-item.selected{--active-cat-bg:rgba(16,185,129,.12);--active-cat-border:rgba(16,185,129,.28)}
-.body:has([data-cat="tw2hk"].active) .config-item.selected{--active-cat-bg:rgba(139,92,246,.12);--active-cat-border:rgba(139,92,246,.28)}
-.body:has([data-cat="jp"].active) .config-item.selected{--active-cat-bg:rgba(236,72,153,.12);--active-cat-border:rgba(236,72,153,.28)}
-.body:has([data-cat="cngov"].active) .config-item.selected{--active-cat-bg:rgba(99,102,241,.12);--active-cat-border:rgba(99,102,241,.28)}
 
 .btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s,background .22s ease,border-color .22s ease;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
 .btn:hover{opacity:.9}
