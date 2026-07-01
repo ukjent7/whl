@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      7.0.2
+// @version      7.0.3
 // @description  Convert webpage Chinese text using opencc-wasm. 
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -306,8 +306,7 @@
   function writeConverted(converted, gen) {
     for (const { item, result } of converted) {
       if (isStale(gen)) break;
-      const currentState = nodeStates.get(item.node);
-      if (currentState !== item.state || item.state.version !== item.version) {
+      if (nodeStates.get(item.node) !== item.state || item.state.version !== item.version) {
         if (item.node.isConnected && shouldProcessTextNode(item.node)) enqueueNode(item.node);
         continue;
       }
@@ -334,14 +333,15 @@
       } catch (err) {
         item.state.errorCount = (item.state.errorCount || 0) + 1;
         state.converterErrorCount++;
-        if (item.state.errorCount >= MAX_NODE_CONVERT_ERRORS) continue;
-        enqueueNode(item.node);
         if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
+          if (item.state.errorCount < MAX_NODE_CONVERT_ERRORS) enqueueNode(item.node);
           if (converted.length) { stopObserving(false); writeConverted(converted, gen); if (!isStale(gen)) startObserving(); }
           setStatus("Conversion failed", false, true);
           clearQueue(); state.converterErrorCount = 0; converterCache.delete(gen.config);
           return { fatal: true };
         }
+        if (item.state.errorCount >= MAX_NODE_CONVERT_ERRORS) continue;
+        enqueueNode(item.node);
         await new Promise(r => setTimeout(r, CONVERTER_ERROR_COOLDOWN_MS * state.converterErrorCount));
         continue;
       }
@@ -634,7 +634,7 @@
   <div class="body">
     <div class="body-left"><div class="categories"></div></div>
     <div class="body-right">
-      <div class="config-list"></div>
+      <div class="config-list" role="radiogroup" aria-label="OpenCC conversion configs"></div>
       <button class="btn" type="button"></button>
     </div>
   </div>
@@ -706,17 +706,25 @@
       const item = document.createElement("div");
       item.className = "config-item" + (value === state.config ? " selected" : "");
       item.dataset.value = value;
+      item.setAttribute("role", "radio");
+      item.setAttribute("aria-checked", value === state.config ? "true" : "false");
+      item.tabIndex = 0;
       const radio = document.createElement("div"); radio.className = "config-radio";
       const labelEl = document.createElement("div"); labelEl.className = "config-label"; labelEl.textContent = label;
       item.appendChild(radio); item.appendChild(labelEl);
       item.addEventListener("click", () => setConfig(value));
+      item.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setConfig(value); }
+      });
       list.appendChild(item);
     }
   }
 
   function updateConfigListSelection() {
     for (const item of state.ui.configList.querySelectorAll(".config-item")){
-      item.classList.toggle("selected", item.dataset.value === state.config);
+      const isSelected = item.dataset.value === state.config;
+      item.classList.toggle("selected", isSelected);
+      item.setAttribute("aria-checked", isSelected ? "true" : "false");
     }
   }
 
