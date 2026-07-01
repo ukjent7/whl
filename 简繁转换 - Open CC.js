@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      7.0.0
-// @description  Convert webpage Chinese text using opencc-wasm. Refactored for Chrome 130+.
+// @version      7.0.1
+// @description  Convert webpage Chinese text using opencc-wasm. 
 // @author       ANY
 // @match        https://czbooks.net/*
 // @match        https://baijiahao.baidu.com/*
@@ -80,6 +80,7 @@
     converterErrorCount: 0, moduleLoadErrorCount: 0, pendingConfig: null,
     loadDisabled: false, status: { text: "", busy: false, error: false },
     ui: null, _retryDelay: null, processingDone: Promise.resolve(), processingDone_resolve: null,
+    brokenConfigs: new Set(),
   };
 
   const listeners = new Set();
@@ -104,9 +105,6 @@
     state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
 
     if (document.contentType && !/html/i.test(document.contentType)) return;
-    if (document.readyState === "loading"){
-      await new Promise(r => document.addEventListener("DOMContentLoaded", r, { once: true }));
-    }
     if (!document.body) return;
     
     createPanel();
@@ -213,6 +211,7 @@
       entry.original = node.nodeValue;
       entry.version++;
       entry.convertedConfig = null; entry.convertedText = null;
+      entry.errorCount = 0;
     }
     return entry;
   }
@@ -346,10 +345,14 @@
       try { converter = await getConverter(gen.config); }
       catch (err) {
         if (err?.kind === "converter_init" && err.config === gen.config) {
-          setStatus(`Config '${gen.config}' failed`, false, true); clearQueue(); return;
+          state.brokenConfigs.add(gen.config);
+          setStatus(`Config '${gen.config}' failed`, false, true);
+          clearQueue();
+          return;
         }
         throw err;
       }
+      state.brokenConfigs.delete(gen.config);
       state.moduleLoadErrorCount = 0; state.converterErrorCount = 0; state.loadDisabled = false;
       if (isStale(gen)) return;
 
@@ -408,8 +411,11 @@
       if (state.enabled) {
         const delay = state._retryDelay ?? 0;
         state._retryDelay = null;
-        if (delay > 0) scheduleFullScan(delay);
-        else if (state.queue.length) scheduleProcess(0);
+        if (delay > 0) {
+          scheduleProcess(delay);
+        } else if (state.queue.length) {
+          scheduleProcess(0);
+        }
       } else clearQueue();
     }
   }
@@ -498,8 +504,12 @@
     state.generation++; clearQueue();
     if (state.enabled) {
       setStatus(`Switching to ${state.config}…`, true);
-      const count = requeueForConfigChange();
-      if (count > 0) scheduleProcess(0); else setStatus(STATUS_ON_PREFIX + state.config);
+      if (state.brokenConfigs.has(state.config)) {
+        scheduleFullScan(0);
+      } else {
+        const count = requeueForConfigChange();
+        if (count > 0) scheduleProcess(0); else setStatus(STATUS_ON_PREFIX + state.config);
+      }
     } else setStatus("Off");
     notify();
   }
