@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      6.2.0
-// @description  Convert webpage Chinese text using opencc-wasm.
+// @version      7.0.0
+// @description  Convert webpage Chinese text using opencc-wasm. Refactored for Chrome 130+.
 // @author       ANY
 // @match        https://czbooks.net/*
 // @match        https://baijiahao.baidu.com/*
@@ -37,42 +37,25 @@
 
   const CONFIG_GROUPS = [
     { id: "s2t", label: "简→繁", color: "#f59e0b", configs: [
-      ["s2t", "简 → 繁体"],
-      ["s2twp", "简 → 台繁 + 词汇"],
-      ["s2tw", "简 → 台繁"],
-      ["s2hkp", "简 → 港繁 + 词汇"],
-      ["s2hk", "简 → 港繁"],
-      ["s2t_jieba", "简 → 繁体 (结巴)"],
-      ["s2twp_jieba", "简 → 台繁 + 词汇 (结巴)"],
-      ["s2tw_jieba", "简 → 台繁 (结巴)"],
-      ["s2hkp_jieba", "简 → 港繁 + 词汇 (结巴)"],
-      ["s2hk_jieba", "简 → 港繁 (结巴)"],
+      ["s2t", "简 → 繁体"], ["s2twp", "简 → 台繁 + 词汇"], ["s2tw", "简 → 台繁"],
+      ["s2hkp", "简 → 港繁 + 词汇"], ["s2hk", "简 → 港繁"], ["s2t_jieba", "简 → 繁体 (结巴)"],
+      ["s2twp_jieba", "简 → 台繁 + 词汇 (结巴)"], ["s2tw_jieba", "简 → 台繁 (结巴)"],
+      ["s2hkp_jieba", "简 → 港繁 + 词汇 (结巴)"], ["s2hk_jieba", "简 → 港繁 (结巴)"],
     ]},
     { id: "t2s", label: "繁→简", color: "#10b981", configs: [
-      ["t2s", "繁体 → 简"],
-      ["tw2sp", "台繁 → 简 + 词汇"],
-      ["tw2s", "台繁 → 简"],
-      ["hk2sp", "港繁 → 简 + 词汇"],
-      ["hk2s", "港繁 → 简"],
-      ["tw2sp_jieba", "台繁 → 简 + 词汇 (结巴)"],
-      ["hk2sp_jieba", "港繁 → 简 + 词汇 (结巴)"],
-      ["t2s_cngov", "繁体 → 国标简"],
+      ["t2s", "繁体 → 简"], ["tw2sp", "台繁 → 简 + 词汇"], ["tw2s", "台繁 → 简"],
+      ["hk2sp", "港繁 → 简 + 词汇"], ["hk2s", "港繁 → 简"], ["tw2sp_jieba", "台繁 → 简 + 词汇 (结巴)"],
+      ["hk2sp_jieba", "港繁 → 简 + 词汇 (结巴)"], ["t2s_cngov", "繁体 → 国标简"],
     ]},
     { id: "tw2hk", label: "繁→繁", color: "#8b5cf6", configs: [
-      ["t2tw", "繁体 → 台繁"],
-      ["t2hk", "繁体 → 港繁"],
-      ["tw2t", "台繁 → 繁体"],
-      ["hk2t", "港繁 → 繁体"],
+      ["t2tw", "繁体 → 台繁"], ["t2hk", "繁体 → 港繁"], ["tw2t", "台繁 → 繁体"], ["hk2t", "港繁 → 繁体"],
     ]},
     { id: "jp", label: "日文", color: "#ec4899", configs: [
-      ["jp2t", "新字体 → 旧字体"],
-      ["t2jp", "旧字体 → 新字体"],
+      ["jp2t", "新字体 → 旧字体"], ["t2jp", "旧字体 → 新字体"],
     ]},
     { id: "cngov", label: "国标", color: "#6366f1", configs: [
-      ["s2t_cngov", "简 → 国标繁"],
-      ["t2cngov", "繁体 → 国标繁"],
-      ["t2cngov_keep_simp", "国标繁 (保留简体)"],
-      ["t2cngov_jieba", "国标繁 (结巴)"],
+      ["s2t_cngov", "简 → 国标繁"], ["t2cngov", "繁体 → 国标繁"],
+      ["t2cngov_keep_simp", "国标繁 (保留简体)"], ["t2cngov_jieba", "国标繁 (结巴)"],
       ["t2cngov_keep_simp_jieba","国标繁 (保留简体, 结巴)"],
     ]},
   ];
@@ -90,43 +73,18 @@
 
   const HAS_HAN = /\p{Script=Han}/u;
 
-  const yieldToMain = typeof scheduler?.yield === "function"
-  ? () => scheduler.yield()
-  : () => new Promise(r => {
-      const { port1, port2 } = new MessageChannel();
-      port1.onmessage = () => { port1.close(); port2.close(); r(); };
-      port2.postMessage(null);
-    });
-
   const state = {
-    config:              DEFAULT_CONFIG,
-    enabled:             DEFAULT_ENABLED,
-    collapsed:           false,
-    queue:               [],
-    queuedNodes:         new WeakSet(),
-    processing:          false,
-    generation:          0,
-    observing:           false,
-    processTimer:        0,
-    fullScanTimer:       0,
-    toggling:            false,
-    converterErrorCount:    0,
-    moduleLoadErrorCount:   0,
-    pendingConfig:       null,
-    loadDisabled:        false,
-    status:              { text: "", busy: false, error: false },
-    ui:                  null,
-    _retryDelay:         null,
-    processingDone:      Promise.resolve(),
-    processingDone_resolve: null,
+    config: DEFAULT_CONFIG, enabled: DEFAULT_ENABLED, collapsed: false,
+    queue: [], queuedNodes: new WeakSet(), processing: false, generation: 0,
+    observing: false, processTimer: 0, fullScanTimer: 0, toggling: false,
+    converterErrorCount: 0, moduleLoadErrorCount: 0, pendingConfig: null,
+    loadDisabled: false, status: { text: "", busy: false, error: false },
+    ui: null, _retryDelay: null, processingDone: Promise.resolve(), processingDone_resolve: null,
   };
 
-  function initState() {
-    state.config = readConfig();
-    state.enabled = storeGet("enabled", DEFAULT_ENABLED);
-    state.collapsed = storeGet("collapsed", false);
-    state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
-  }
+  const listeners = new Set();
+  const subscribe = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
+  const notify = () => listeners.forEach(fn => fn(state));
 
   const nodeStates = new WeakMap();
   let openccModulePromise = null;
@@ -135,20 +93,24 @@
   const observer = new MutationObserver(handleMutations);
 
   main().catch(err => {
-    console.error("[OpenCC-WASM userscript] Fatal error:", err);
+    console.error("[OpenCC-WASM] Fatal:", err);
     setStatus("Fatal error", false, true);
   });
 
   async function main() {
-    initState();
+    state.config = readConfig();
+    state.enabled = storeGet("enabled", DEFAULT_ENABLED);
+    state.collapsed = storeGet("collapsed", false);
+    state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
+
     if (document.contentType && !/html/i.test(document.contentType)) return;
     if (document.readyState === "loading"){
-      await new Promise(resolve => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
+      await new Promise(r => document.addEventListener("DOMContentLoaded", r, { once: true }));
     }
     if (!document.body) return;
+    
     createPanel();
     if (state.enabled) { startObserving(); scheduleFullScan(0); }
-    else setStatus("Off");
   }
 
   function readConfig() {
@@ -160,42 +122,35 @@
     try {
       const raw = localStorage.getItem(STORE_PREFIX + key);
       return raw == null ? fallback : JSON.parse(raw);
-    } catch (err) {
-      console.warn("[OpenCC-WASM userscript] storeGet failed:", err);
-      return fallback;
-    }
+    } catch { return fallback; }
   }
 
   function storeSet(key, value) {
-    try {
-      localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value));
-    } catch (err) {
-      console.warn("[OpenCC-WASM userscript] storeSet failed:", err);
-    }
+    try { localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value)); } catch {}
   }
 
   async function getConverter(configName) {
     if (!openccModulePromise) {
       openccModulePromise = import(OPENCC_ESM_URL).then(mod => {
         openccModule = mod.default || mod;
-        if (typeof openccModule?.Converter !== "function") {
-          throw new Error("Loaded module does not expose a Converter function");
-        }
+        if (typeof openccModule?.Converter !== "function") throw new Error("No Converter fn");
         return openccModule;
       }).catch(err => {
         openccModulePromise = null;
-        const e = new Error(`Failed to load OpenCC module: ${err?.message ?? err}`);
+        const e = new Error(`Load module failed: ${err?.message ?? err}`);
         e.kind = "module_load";
         throw e;
       });
     }
     await openccModulePromise;
     if (converterCache.has(configName)) return converterCache.get(configName);
+    
     const buildPromise = (async () => {
       const converter = openccModule.Converter({ config: configName });
       await converter(WARMUP_TEXT);
       return converter;
     })();
+    
     converterCache.set(configName, buildPromise);
     try {
       const converter = await buildPromise;
@@ -203,41 +158,43 @@
       return converter;
     } catch (err) {
       converterCache.delete(configName);
-      const e = new Error(`Failed to build converter for '${configName}': ${err?.message ?? err}`);
-      e.kind = "converter_init";
-      e.config = configName;
+      const e = new Error(`Build converter failed '${configName}': ${err?.message ?? err}`);
+      e.kind = "converter_init"; e.config = configName;
       throw e;
     }
   }
 
-  function makeStructuralWalker(root, acceptText) {
-    return document.createTreeWalker(
-      root,
-      NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
-      {
-        acceptNode(node) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            if (node.isContentEditable || node.matches(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
-            return NodeFilter.FILTER_SKIP;
-          }
-          return acceptText(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
-        }
-      }
-    );
-  }
-
   function shouldSkipElement(el) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
-    if (el.isContentEditable) return true;
-    return Boolean(el.closest(SKIP_SELECTOR));
+    return el.isContentEditable || Boolean(el.closest(SKIP_SELECTOR));
   }
 
   function shouldProcessTextNode(node) {
     if (!node || node.nodeType !== Node.TEXT_NODE) return false;
     const text = node.nodeValue;
     if (!text || !HAS_HAN.test(text)) return false;
-    const parent = node.parentElement;
-    return Boolean(parent && !shouldSkipElement(parent));
+    return Boolean(node.parentElement && !shouldSkipElement(node.parentElement));
+  }
+
+  function walkTextNodes(root, filterFn, callback) {
+    if (!root) return;
+    if (root.nodeType === Node.TEXT_NODE) {
+      if (filterFn(root)) callback(root);
+      return;
+    }
+    if (root.nodeType === Node.ELEMENT_NODE && shouldSkipElement(root)) return;
+    if (root.nodeType !== Node.DOCUMENT_NODE && root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE && root.nodeType !== Node.ELEMENT_NODE) return;
+
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+      acceptNode(node) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          return (node.isContentEditable || node.matches(SKIP_SELECTOR)) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;
+        }
+        return filterFn(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+      }
+    });
+    let node;
+    while ((node = walker.nextNode())) callback(node);
   }
 
   function enqueueNode(node) {
@@ -255,8 +212,7 @@
     } else if (resetOriginal) {
       entry.original = node.nodeValue;
       entry.version++;
-      entry.convertedConfig = null;
-      entry.convertedText = null;
+      entry.convertedConfig = null; entry.convertedText = null;
     }
     return entry;
   }
@@ -268,46 +224,37 @@
   }
 
   function collectTextNodes(root, resetOriginal = false) {
-    if (!root) return 0;
-    if (root.nodeType === Node.TEXT_NODE) return enqueueTextNode(root, resetOriginal) ? 1 : 0;
-    if (
-      root.nodeType !== Node.ELEMENT_NODE &&
-      root.nodeType !== Node.DOCUMENT_NODE &&
-      root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE
-    ) return 0;
-    if (root.nodeType === Node.ELEMENT_NODE && shouldSkipElement(root)) return 0;
     let count = 0;
-    const walker = makeStructuralWalker(root, (node) => {
-      const text = node.nodeValue;
-      return Boolean(text && HAS_HAN.test(text));
+    walkTextNodes(root, n => Boolean(n.nodeValue && HAS_HAN.test(n.nodeValue)), n => {
+      rememberOriginal(n, resetOriginal);
+      if (enqueueNode(n)) count++;
     });
-    let node;
-    while ((node = walker.nextNode())) {
-      rememberOriginal(node, resetOriginal);
-      if (enqueueNode(node)) count++;
-    }
     return count;
   }
 
   function requeueForConfigChange() {
     if (!document.body) return 0;
-    const walker = makeStructuralWalker(document.body, (node) => nodeStates.has(node));
     let count = 0;
-    let node;
-    while ((node = walker.nextNode())) {
-      const ns = nodeStates.get(node);
-      if (!ns) continue;
-      const needsProcess =
-        (ns.original && HAS_HAN.test(ns.original)) ||
-        (ns.convertedText !== null && shouldProcessTextNode(node));
-      if (!needsProcess) continue;
-      if (ns.convertedConfig === state.config && node.nodeValue === ns.convertedText) continue;
-      if (enqueueNode(node)) count++;
-    }
+    walkTextNodes(document.body, n => nodeStates.has(n), n => {
+      const ns = nodeStates.get(n);
+      if (!ns) return;
+      const needsProcess = (ns.original && HAS_HAN.test(ns.original)) || (ns.convertedText !== null && shouldProcessTextNode(n));
+      if (!needsProcess) return;
+      if (ns.convertedConfig === state.config && n.nodeValue === ns.convertedText) return;
+      if (enqueueNode(n)) count++;
+    });
     return count;
   }
 
   function clearQueue() { state.queue.length = 0; state.queuedNodes = new WeakSet(); }
+
+  const yieldToMain = typeof scheduler?.yield === "function"
+    ? () => scheduler.yield()
+    : () => new Promise(r => {
+        const { port1, port2 } = new MessageChannel();
+        port1.onmessage = () => { port1.close(); port2.close(); r(); };
+        port2.postMessage(null);
+      });
 
   function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
     if (!state.enabled || state.loadDisabled) return;
@@ -315,15 +262,10 @@
     state.fullScanTimer = setTimeout(() => {
       state.fullScanTimer = 0;
       if (!state.enabled || !document.body) return;
-      stopObserving(false);
-      clearQueue();
+      stopObserving(false); clearQueue();
       const count = collectTextNodes(document.body, true);
-      if (count > 0) {
-        setStatus(`Queued ${count} text nodes`, true);
-        scheduleProcess(0);
-      } else {
-        setStatus(STATUS_ON_PREFIX + state.config);
-      }
+      if (count > 0) { setStatus(`Queued ${count} nodes`, true); scheduleProcess(0); }
+      else setStatus(STATUS_ON_PREFIX + state.config);
       if (state.enabled) startObserving();
     }, Math.max(delay, MIN_FULL_SCAN_DELAY_MS));
   }
@@ -333,18 +275,13 @@
     if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
     state.processTimer = setTimeout(() => {
       state.processTimer = 0;
-      if (typeof scheduler?.postTask === "function") {
-        scheduler.postTask(() => processQueue(), { priority: "background" });
-      } else {
-        void processQueue();
-      }
+      if (typeof scheduler?.postTask === "function") scheduler.postTask(() => processQueue(), { priority: "background" });
+      else void processQueue();
     }, delay);
   }
 
-  function currentGen() { return { generation: state.generation, config: state.config }; }
-  function isStale(gen) {
-    return !state.enabled || state.generation !== gen.generation || state.config !== gen.config;
-  }
+  const currentGen = () => ({ generation: state.generation, config: state.config });
+  const isStale = (gen) => !state.enabled || state.generation !== gen.generation || state.config !== gen.config;
 
   function writeConverted(converted, gen) {
     for (const { item, result } of converted) {
@@ -360,21 +297,9 @@
         item.state.convertedConfig = gen.config;
         item.state.convertedText = convertedText;
         if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
-      } catch (err) {
-        console.warn("[OpenCC-WASM userscript] Failed to write converted text:", err);
+      } catch {
         nodeStates.delete(item.node);
       }
-    }
-  }
-
-  async function loadConverterOrFail(myConfig) {
-    try {
-      return await getConverter(myConfig);
-    } catch (err) {
-      if (err?.kind === "converter_init" && err.config === myConfig) {
-        return { configFailed: true, message: err.message };
-      }
-      throw err;
     }
   }
 
@@ -389,25 +314,15 @@
       } catch (err) {
         item.state.errorCount = (item.state.errorCount || 0) + 1;
         state.converterErrorCount++;
-        console.error("[OpenCC-WASM userscript] Conversion failed:", err);
-        if (item.state.errorCount >= MAX_NODE_CONVERT_ERRORS) {
-          console.warn("[OpenCC-WASM userscript] Skipping node after repeated failures:", item.node.nodeValue);
-          continue;
-        }
+        if (item.state.errorCount >= MAX_NODE_CONVERT_ERRORS) continue;
         enqueueNode(item.node);
         if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
-          if (converted.length) {
-            stopObserving(false);
-            writeConverted(converted, gen);
-            if (!isStale(gen)) startObserving();
-          }
+          if (converted.length) { stopObserving(false); writeConverted(converted, gen); if (!isStale(gen)) startObserving(); }
           setStatus("Conversion failed", false, true);
-          clearQueue();
-          state.converterErrorCount = 0;
-          converterCache.delete(gen.config);
+          clearQueue(); state.converterErrorCount = 0; converterCache.delete(gen.config);
           return { fatal: true };
         }
-        await new Promise(resolve => setTimeout(resolve, CONVERTER_ERROR_COOLDOWN_MS * state.converterErrorCount));
+        await new Promise(r => setTimeout(r, CONVERTER_ERROR_COOLDOWN_MS * state.converterErrorCount));
         continue;
       }
       converted.push({ item, result });
@@ -419,26 +334,26 @@
     if (state.processing || !state.enabled) return;
     if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
     if (!state.queue.length) { setStatus(STATUS_ON_PREFIX + state.config); return; }
+    
     state.processing = true;
     const { promise, resolve } = Promise.withResolvers();
-    state.processingDone = promise;
-    state.processingDone_resolve = resolve;
+    state.processingDone = promise; state.processingDone_resolve = resolve;
     const gen = currentGen();
+    
     try {
       setStatus(`Loading ${gen.config}…`, true);
-      const converter = await loadConverterOrFail(gen.config);
-      if (converter?.configFailed) {
-        setStatus(`Config '${gen.config}' failed – ${converter.message}`, false, true);
-        clearQueue();
-        return;
+      let converter;
+      try { converter = await getConverter(gen.config); }
+      catch (err) {
+        if (err?.kind === "converter_init" && err.config === gen.config) {
+          setStatus(`Config '${gen.config}' failed`, false, true); clearQueue(); return;
+        }
+        throw err;
       }
-      state.moduleLoadErrorCount = 0;
-      state.converterErrorCount = 0;
-      state.loadDisabled = false;
+      state.moduleLoadErrorCount = 0; state.converterErrorCount = 0; state.loadDisabled = false;
       if (isStale(gen)) return;
 
-      let didWork = true;
-      let chunkCounter = 0;
+      let didWork = true, chunkCounter = 0;
       while (!isStale(gen) && didWork) {
         didWork = false;
         const chunk = [];
@@ -452,11 +367,10 @@
           chunk.push({ node, state: ns, version: ns.version, original: ns.original });
         }
         if (!chunk.length) { await yieldToMain(); continue; }
-        didWork = true;
-        chunkCounter++;
-        if (chunkCounter % 3 === 0 || state.queue.length === 0) {
-          setStatus(`Converting… ${state.queue.length} left`, true);
-        }
+        
+        didWork = true; chunkCounter++;
+        if (chunkCounter % 3 === 0 || state.queue.length === 0) setStatus(`Converting… ${state.queue.length} left`, true);
+        
         const { converted, fatal } = await convertChunk(chunk, converter, gen);
         if (fatal) return;
         if (isStale(gen)) break;
@@ -466,30 +380,22 @@
         if (!isStale(gen)) startObserving();
         await yieldToMain();
       }
-
       if (!isStale(gen)) setStatus(STATUS_ON_PREFIX + gen.config);
     } catch (err) {
       const isModuleError = err?.kind === "module_load" || !openccModule;
       if (isModuleError) {
-        console.error("[OpenCC-WASM userscript] Module load error:", err);
-        openccModulePromise = null;
-        openccModule = null;
+        openccModulePromise = null; openccModule = null;
         state.moduleLoadErrorCount++;
         if (state.moduleLoadErrorCount >= MAX_MODULE_LOAD_ERRORS) {
-          setStatus("Load failed – reload page to retry", false, true);
-          clearQueue();
-          state.loadDisabled = true;
-          stopObserving(false);
-          clearScheduledTimers();
+          setStatus("Load failed – reload page", false, true);
+          clearQueue(); state.loadDisabled = true; stopObserving(false); clearScheduledTimers();
           return;
         }
         const backoff = MODULE_LOAD_RETRY_BASE_MS * state.moduleLoadErrorCount;
-        setStatus(`Load error – retrying in ${backoff / 1000}s…`, false, true);
+        setStatus(`Load error – retry in ${backoff / 1000}s…`, false, true);
         state._retryDelay = backoff;
       } else {
-        console.error("[OpenCC-WASM userscript] Unexpected runtime error:", err);
-        setStatus("Internal error — see console", false, true);
-        clearQueue();
+        setStatus("Internal error — see console", false, true); clearQueue();
       }
     } finally {
       if (!isStale(gen)) {
@@ -498,18 +404,13 @@
       }
       state.processing = false;
       if (state.enabled && !state.loadDisabled) startObserving();
-      if (state.processingDone_resolve) {
-        state.processingDone_resolve();
-        state.processingDone_resolve = null;
-      }
+      if (state.processingDone_resolve) { state.processingDone_resolve(); state.processingDone_resolve = null; }
       if (state.enabled) {
         const delay = state._retryDelay ?? 0;
         state._retryDelay = null;
         if (delay > 0) scheduleFullScan(delay);
         else if (state.queue.length) scheduleProcess(0);
-      } else {
-        clearQueue();
-      }
+      } else clearQueue();
     }
   }
 
@@ -527,9 +428,7 @@
             rememberOriginal(node, true);
             if (enqueueNode(node)) enqueued++;
           } else if (enqueueTextNode(node, true)) enqueued++;
-        } else {
-          nodeStates.delete(node);
-        }
+        } else nodeStates.delete(node);
       } else if (mutation.type === "childList") {
         for (const added of mutation.addedNodes) enqueued += collectTextNodes(added, false);
       }
@@ -545,9 +444,8 @@
 
   function stopObserving(processPending = false) {
     if (!state.observing) return;
-    if (processPending) { const pending = observer.takeRecords(); if (pending.length) handleMutations(pending); }
-    observer.disconnect();
-    state.observing = false;
+    if (processPending) { const p = observer.takeRecords(); if (p.length) handleMutations(p); }
+    observer.disconnect(); state.observing = false;
   }
 
   function clearScheduledTimers() {
@@ -556,84 +454,59 @@
   }
 
   async function restoreOriginals() {
-    clearScheduledTimers();
-    stopObserving(true);
-    const myGeneration = state.generation;
-    const walker = makeStructuralWalker(document.body, (node) => nodeStates.has(node));
-    let iterCount = 0;
-    let node;
-    while ((node = walker.nextNode())) {
-      if (state.generation !== myGeneration) {
-        do {
-          const ns = nodeStates.get(node);
-          if (ns) { ns.convertedConfig = null; ns.convertedText = null; ns.version++; }
-        } while ((node = walker.nextNode()));
-        break;
-      }
-      const ns = nodeStates.get(node);
+    clearScheduledTimers(); stopObserving(true);
+    const myGen = state.generation;
+    let count = 0;
+    walkTextNodes(document.body, n => nodeStates.has(n), n => {
+      if (state.generation !== myGen) return;
+      const ns = nodeStates.get(n);
       if (ns) {
-        if (node.isConnected && node.nodeValue !== ns.original) node.nodeValue = ns.original;
-        ns.convertedConfig = null;
-        ns.convertedText = null;
-        ns.version++;
+        if (n.isConnected && n.nodeValue !== ns.original) n.nodeValue = ns.original;
+        ns.convertedConfig = null; ns.convertedText = null; ns.version++;
       }
-      if (++iterCount % RESTORE_YIELD_EVERY_N_NODES === 0) await yieldToMain();
-    }
+    });
     clearQueue();
   }
 
   async function setEnabled(nextEnabled) {
     nextEnabled = Boolean(nextEnabled);
-    if (nextEnabled === state.enabled) { refreshControls(); return; }
-    state.generation++;
-    clearScheduledTimers();
-    state.toggling = true;
+    if (nextEnabled === state.enabled) { notify(); return; }
+    state.generation++; clearScheduledTimers(); state.toggling = true;
     try {
       if (!nextEnabled) {
         stopObserving(false);
-        if (state.processing) {
-          const timeout = new Promise(r => setTimeout(r, 3000));
-          await Promise.race([state.processingDone, timeout]);
-        }
-        state.enabled = false;
-        storeSet("enabled", false);
+        if (state.processing) await Promise.race([state.processingDone, new Promise(r => setTimeout(r, 3000))]);
+        state.enabled = false; storeSet("enabled", false);
         await restoreOriginals();
         setStatus("Off");
       } else {
-        state.enabled = true;
-        storeSet("enabled", true);
-        state.loadDisabled = false;
+        state.enabled = true; storeSet("enabled", true); state.loadDisabled = false;
         setStatus(STATUS_ON_PREFIX + state.config, true);
-        startObserving();
-        scheduleFullScan(0);
+        startObserving(); scheduleFullScan(0);
       }
-    } finally {
-      state.toggling = false;
-    }
-    if (state.pendingConfig) {
-      const pending = state.pendingConfig;
-      state.pendingConfig = null;
-      setConfig(pending);
-    } else {
-      refreshControls();
-    }
+    } finally { state.toggling = false; }
+    
+    if (state.pendingConfig) { const p = state.pendingConfig; state.pendingConfig = null; setConfig(p); }
+    else notify();
   }
 
   function setConfig(nextConfig) {
     if (!CONFIG_VALUES.has(nextConfig)) return;
     if (state.toggling) { state.pendingConfig = nextConfig; return; }
-    if (nextConfig === state.config) { refreshControls(); return; }
-    state.config = nextConfig;
-    storeSet("config", state.config);
-    state.generation++;
-    clearQueue();
-    refreshControls();
+    if (nextConfig === state.config) { notify(); return; }
+    state.config = nextConfig; storeSet("config", state.config);
+    state.generation++; clearQueue();
     if (state.enabled) {
       setStatus(`Switching to ${state.config}…`, true);
       const count = requeueForConfigChange();
-      if (count > 0) scheduleProcess(0);
-      else setStatus(STATUS_ON_PREFIX + state.config);
+      if (count > 0) scheduleProcess(0); else setStatus(STATUS_ON_PREFIX + state.config);
     } else setStatus("Off");
+    notify();
+  }
+
+  function setStatus(text, busy = false, error = false) {
+    state.status = { text, busy, error };
+    notify();
   }
 
   function createPanel() {
@@ -646,22 +519,21 @@
 
     root.innerHTML = `
 <style>
-:host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC","SF Pro Display",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(12,12,20,.85);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.08);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a;anchor-name:--fab-anchor;transition:left .3s cubic-bezier(0.2,0.8,0.2,1),top .3s cubic-bezier(0.2,0.8,0.2,1)}
-:host(.dragging){-webkit-user-select:none;user-select:none;transition:none}
+:host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC","SF Pro Display",system-ui,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(12,12,20,.85);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.08);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a;anchor-name:--fab-anchor;transition:left .3s cubic-bezier(0.2,0.8,0.2,1),top .3s cubic-bezier(0.2,0.8,0.2,1)}
+:host(.dragging){user-select:none;transition:none}
 *{box-sizing:border-box;margin:0;padding:0}
 @keyframes dotBlink{0%,100%{opacity:1;box-shadow:0 0 6px 1px var(--warning)}50%{opacity:.4;box-shadow:0 0 2px 0px var(--warning)}}
 @keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,0.45)}50%{box-shadow:0 0 0 8px rgba(52,211,153,0)}}
 @keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-4px)}60%{transform:translateX(4px)}}
 
-.fab::before,.panel::before{content:"";position:absolute;inset:0;border-radius:inherit;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.06'/%3E%3C/svg%3E");pointer-events:none;mix-blend-mode:overlay;z-index:1}
+.fab::before,.panel::before{content:"";position:absolute;inset:0;border-radius:inherit;background:radial-gradient(circle at 50% 0%, rgba(255,255,255,0.05), transparent 70%);pointer-events:none;mix-blend-mode:overlay;z-index:1}
 .fab-inner,.header,.body,.footer,.fab-dot,.btn{position:relative;z-index:2}
 
 .fab{position:absolute;right:0;bottom:0;width:52px;height:52px;z-index:2;border-radius:16px;border:1px solid var(--border-strong);background:var(--bg);backdrop-filter:blur(24px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform .25s cubic-bezier(0.34,1.56,0.64,1),box-shadow .2s ease;box-shadow:0 8px 32px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,0.12),inset 0 -1px 0 rgba(0,0,0,0.3)}
 .fab:hover{transform:scale(1.08) translateY(-2px)}
 .fab:active{transform:scale(0.92)}
-.fab[hidden]{display:none!important}
 .fab:has(.fab-dot.busy){box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 2px var(--warning),inset 0 1px 0 rgba(255,255,255,0.12)}
-.fab-inner{font-size:18px;line-height:1;font-weight:800;background:linear-gradient(135deg,#a78bfa,#67e8f9);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.fab-inner{font-size:18px;line-height:1;font-weight:800;background:linear-gradient(135deg,#a78bfa,#67e8f9);background-clip:text;color:transparent}
 
 .fab-dot,.header-dot{border-radius:50%;background:var(--text-3);transition:background .3s ease,box-shadow .3s ease}
 .fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border:1.5px solid rgba(10,10,18,.9)}
@@ -670,17 +542,16 @@
 .fab-dot.busy,.header-dot.busy{background:var(--warning);animation:dotBlink 1.2s ease-in-out infinite}
 .fab-dot.error,.header-dot.error{background:var(--danger);animation:dotBlink 1.2s ease-in-out infinite,shake 0.5s ease-in-out}
 
-.panel{width:320px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 0 0 1px var(--primary-glow),0 24px 64px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,0.08),inset 0 0 0 1px rgba(255,255,255,0.03);overflow:hidden;opacity:1;transform:translateY(0) scale(1);transition:opacity 0.35s cubic-bezier(0.16,1,0.3,1),transform 0.55s cubic-bezier(0.34,1.8,0.64,1),box-shadow 0.4s ease,display .3s allow-discrete;position:fixed;position-anchor:--fab-anchor;position-area:block-end span-inline-end;position-try-fallbacks:block-end span-inline-start,block-start span-inline-end,block-start span-inline-start;margin:4px}
-@starting-style{.panel{opacity:0;transform:translateY(24px) scale(0.92) translateZ(0);box-shadow:0 4px 12px rgba(0,0,0,0.2)}}
-.panel[hidden]{opacity:0;transform:translateY(12px) scale(0.98);display:none;pointer-events:none}
-.panel::after{content:"";position:absolute;inset:-60px;border-radius:40px;background:radial-gradient(ellipse 80% 50% at 50% 0%,var(--primary-glow),transparent 70%);opacity:0.5;pointer-events:none;z-index:-1;filter:blur(20px);transition:opacity 0.4s ease}
-.panel[hidden]::after{opacity:0}
-.panel.collapsing{opacity:0;transform:translateY(12px) scale(0.98);pointer-events:none}
+.panel{width:320px;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 0 0 1px var(--primary-glow),0 24px 64px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,0.08);overflow:hidden;position-anchor:--fab-anchor;position-area:block-end span-inline-end;margin:4px;opacity:0;transform:translateY(12px) scale(0.98);transition:opacity 0.35s cubic-bezier(0.16,1,0.3,1),transform 0.55s cubic-bezier(0.34,1.8,0.64,1),overlay 0.35s allow-discrete,display 0.35s allow-discrete}
+.panel:popover-open{opacity:1;transform:translateY(0) scale(1)}
+@starting-style{.panel:popover-open{opacity:0;transform:translateY(24px) scale(0.92)}}
+.panel::backdrop{background:transparent}
+.panel::after{content:"";position:absolute;inset:-60px;border-radius:40px;background:radial-gradient(ellipse 80% 50% at 50% 0%,var(--primary-glow),transparent 70%);opacity:0.5;pointer-events:none;z-index:-1;filter:blur(20px)}
 
 .header{display:flex;align-items:center;gap:8px;padding:12px 14px 11px;cursor:grab;user-select:none;border-bottom:1px solid var(--border)}
 .header:active{cursor:grabbing}
 .header-label{font-size:13px;font-weight:800;color:var(--text-1);letter-spacing:.02em;flex-shrink:0}
-.header-status{flex:1;font-size:12px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;transition:color .3s;font-variant-numeric:tabular-nums;letter-spacing:0.02em}
+.header-status{flex:1;font-size:12px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
 .header-status.busy{color:var(--warning)}
 .header-status.error{color:var(--danger)}
 
@@ -695,11 +566,9 @@
 .cat-btn.active::before{opacity:1;transform:scaleY(1)}
 
 .body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}
-.config-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;mask-image:linear-gradient(to bottom,transparent,black 16px,black calc(100% - 16px),transparent);-webkit-mask-image:linear-gradient(to bottom,transparent,black 16px,black calc(100% - 16px),transparent)}
+.config-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;mask-image:linear-gradient(to bottom,transparent,black 16px,black calc(100% - 16px),transparent)}
 .config-list::-webkit-scrollbar{width:5px}
-.config-list::-webkit-scrollbar-track{background:transparent}
 .config-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:10px}
-.config-list::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.25)}
 @keyframes listFade{from{opacity:0}to{opacity:1}}
 .config-list.switching{animation:listFade .15s ease}
 .config-item{position:relative;overflow:visible;display:flex;align-items:flex-start;gap:7px;padding:5px 8px;border-radius:7px;cursor:pointer;transition:background .12s,border-color .12s;border:1px solid transparent;flex-shrink:0}
@@ -716,8 +585,7 @@
 .config-item.selected .config-label{color:var(--text-1)}
 
 .btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s,background .22s ease,border-color .22s ease;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
-.btn:hover{opacity:.9}
-.btn:active{transform:scale(0.96) translateY(1px);box-shadow:inset 0 2px 6px rgba(0,0,0,0.5),0 0 0 1px rgba(255,255,255,0.04)}
+.btn:active{transform:scale(0.96) translateY(1px)}
 .btn::after{content:"";position:absolute;top:-50%;left:-60%;width:40%;height:200%;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.15),transparent);transform:skewX(-20deg);transition:left .6s ease;pointer-events:none}
 .btn:hover::after{left:120%}
 .btn-primary{background:linear-gradient(135deg,#6d5af0,#9b6fff);border-color:rgba(150,120,255,.25);color:#fff}
@@ -728,7 +596,7 @@
 .footer-hint{font-size:10px;color:var(--text-3);opacity:.45;letter-spacing:.03em}
 </style>
 <div class="fab" title="OpenCC-WASM — 拖拽移动"><div class="fab-inner">文</div><div class="fab-dot"></div></div>
-<div class="panel" hidden>
+<div class="panel" popover="auto">
   <div class="header">
     <div class="header-dot"></div>
     <span class="header-label">OpenCC</span>
@@ -747,31 +615,27 @@
   </div>
 </div>`;
 
-    const fab = root.querySelector(".fab");
-    const fabDot = root.querySelector(".fab-dot");
-    const panel = root.querySelector(".panel");
-    const header = root.querySelector(".header");
-    const headerDot = root.querySelector(".header-dot");
-    const statusEl = root.querySelector(".header-status");
-    const categoriesEl = root.querySelector(".categories");
-    const configList = root.querySelector(".config-list");
-    const toggle = root.querySelector(".btn");
+    state.ui = {
+      host, root,
+      status: root.querySelector(".header-status"),
+      configList: root.querySelector(".config-list"),
+      categories: root.querySelector(".categories"),
+      toggle: root.querySelector(".btn"),
+      fab: root.querySelector(".fab"),
+      panel: root.querySelector(".panel"),
+      fabDot: root.querySelector(".fab-dot"),
+      headerDot: root.querySelector(".header-dot"),
+      header: root.querySelector(".header"),
+      activeCategory: CONFIG_INDEX.get(state.config),
+    };
 
-    panel.addEventListener("transitionend", (e) => {
-      if (e.propertyName === "opacity" && panel.classList.contains("collapsing")) {
-        panel.classList.remove("collapsing");
-        panel.hidden = true;
-        state.ui.fab.hidden = false;
+    state.ui.panel.addEventListener("toggle", (e) => {
+      if (e.newState === "closed" && !state.collapsed) {
+        state.collapsed = true;
+        storeSet("collapsed", true);
+        notify();
       }
     });
-
-    state.ui = {
-      host, root, status: statusEl, configList,
-      categories: categoriesEl, toggle, fab, panel,
-      fabDot, headerDot, header,
-      activeCategory: CONFIG_INDEX.get(state.config),
-      onDocPointerUp: null,
-    };
 
     for (const group of CONFIG_GROUPS) {
       const btn = document.createElement("button");
@@ -790,35 +654,15 @@
     populateConfigList();
     updateCategoryTabs();
 
-    toggle.addEventListener("click", async () => {
-      toggle.disabled = true;
+    state.ui.toggle.addEventListener("click", async () => {
+      state.ui.toggle.disabled = true;
       try { await setEnabled(!state.enabled); }
-      finally { toggle.disabled = false; }
+      finally { state.ui.toggle.disabled = false; }
     });
 
     setupDrag();
-    refreshControls();
-    setStatus(state.status.text, state.status.busy, state.status.error);
-  }
-
-  function bindOutsideClick() {
-    if (!state.ui || state.ui.onDocPointerUp) return;
-    state.ui.onDocPointerUp = (e) => {
-      if (state.collapsed || !state.ui) return;
-      const inside = e.composedPath().some(n => n === state.ui.host);
-      if (!inside) {
-        state.collapsed = true;
-        storeSet("collapsed", state.collapsed);
-        refreshControls();
-      }
-    };
-    document.addEventListener("pointerup", state.ui.onDocPointerUp, { capture: true });
-  }
-
-  function unbindOutsideClick() {
-    if (!state.ui?.onDocPointerUp) return;
-    document.removeEventListener("pointerup", state.ui.onDocPointerUp, { capture: true });
-    state.ui.onDocPointerUp = null;
+    subscribe(renderUI);
+    renderUI();
   }
 
   function populateConfigList() {
@@ -826,7 +670,7 @@
     const list = state.ui.configList;
     list.innerHTML = "";
     list.classList.remove("switching");
-    void list.offsetWidth; // Force a reflow so removing then re-adding the class restarts the CSS animation.
+    void list.offsetWidth; // Force reflow to restart animation
     list.classList.add("switching");
     state.ui.categories.style.setProperty("--active-cat-color", group.color);
     for (const [value, label] of group.configs) {
@@ -853,93 +697,71 @@
     }
   }
 
-  function refreshControls() {
+  function renderUI() {
     if (!state.ui) return;
-    const catId = CONFIG_INDEX.get(state.config);
-    if (state.ui.activeCategory !== catId) { state.ui.activeCategory = catId; populateConfigList(); }
-    else updateConfigListSelection();
+    const { ui, collapsed, enabled, config, status } = state;
+    
+    if (collapsed) {
+      if (ui.panel.matches(":popover-open")) ui.panel.hidePopover();
+    } else {
+      if (!ui.panel.matches(":popover-open")) ui.panel.showPopover();
+    }
+
+    const catId = CONFIG_INDEX.get(config);
+    if (ui.activeCategory !== catId) {
+      ui.activeCategory = catId;
+      populateConfigList();
+    } else {
+      updateConfigListSelection();
+    }
     updateCategoryTabs();
 
-    if (state.collapsed) {
-      unbindOutsideClick();
-      if (!state.ui.panel.hidden) state.ui.panel.classList.add("collapsing");
-    } else {
-      bindOutsideClick();
-      state.ui.fab.hidden = true;
-      state.ui.panel.hidden = false;
-      state.ui.panel.classList.remove("collapsing");
-    }
-    if (state.ui.remeasureAndClamp) requestAnimationFrame(state.ui.remeasureAndClamp);
+    ui.toggle.textContent = enabled ? "关" : "开";
+    ui.toggle.classList.toggle("btn-danger", enabled);
+    ui.toggle.classList.toggle("btn-primary", !enabled);
 
-    state.ui.toggle.textContent = state.enabled ? "关" : "开";
-    state.ui.toggle.classList.toggle("btn-danger", state.enabled);
-    state.ui.toggle.classList.toggle("btn-primary", !state.enabled);
-    updateStatusDots();
-  }
+    if (ui.status.textContent !== status.text) ui.status.textContent = status.text;
+    ui.status.classList.toggle("busy", status.busy);
+    ui.status.classList.toggle("error", status.error);
 
-  function updateStatusDots() {
-    if (!state.ui) return;
-    const { error, busy } = state.status;
-    const stateClass = error ? "error" : busy ? "busy" : state.enabled ? "on" : "";
-    state.ui.fabDot.className = "fab-dot " + stateClass;
-    state.ui.headerDot.className = "header-dot " + stateClass;
-  }
-
-  function setStatus(text, busy = false, error = false) {
-    state.status = { text, busy, error };
-    if (!state.ui?.status) return;
-    state.ui.status.textContent = text;
-    state.ui.status.classList.toggle("busy", busy);
-    state.ui.status.classList.toggle("error", error);
-    updateStatusDots();
+    const stateClass = status.error ? "error" : status.busy ? "busy" : enabled ? "on" : "";
+    ui.fabDot.className = "fab-dot " + stateClass;
+    ui.headerDot.className = "header-dot " + stateClass;
   }
 
   function setupDrag() {
     if (!state.ui) return;
     const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
-    let cachedHostW = state.ui.host.offsetWidth || 52;
-    let cachedHostH = state.ui.host.offsetHeight || 52;
+    let cachedW = state.ui.host.offsetWidth || 52;
+    let cachedH = state.ui.host.offsetHeight || 52;
     let startX = 0, startY = 0, startLeft = 0, startTop = 0, moved = false;
 
     requestAnimationFrame(() => {
-      cachedHostW = state.ui.host.offsetWidth || cachedHostW;
-      cachedHostH = state.ui.host.offsetHeight || cachedHostH;
+      cachedW = state.ui.host.offsetWidth || cachedW;
+      cachedH = state.ui.host.offsetHeight || cachedH;
       if (savedPos && typeof savedPos.left === "number") applyPosition(savedPos.left, savedPos.top);
     });
 
     function applyPosition(left, top) {
-      const maxL = window.innerWidth - cachedHostW;
-      const maxT = window.innerHeight - cachedHostH;
+      const maxL = window.innerWidth - cachedW;
+      const maxT = window.innerHeight - cachedH;
       state.ui.host.style.right = "auto";
       state.ui.host.style.bottom = "auto";
       state.ui.host.style.left = Math.max(0, Math.min(left, maxL)) + "px";
       state.ui.host.style.top = Math.max(0, Math.min(top, maxT)) + "px";
     }
 
-    function remeasureAndClamp() {
-      if (!state.ui || !state.ui.host.isConnected) return;
-      cachedHostW = state.ui.host.offsetWidth || cachedHostW;
-      cachedHostH = state.ui.host.offsetHeight || cachedHostH;
+    const resizeHandler = () => requestAnimationFrame(() => {
+      if (!state.ui.host.isConnected) { window.removeEventListener("resize", resizeHandler); return; }
       const rect = state.ui.host.getBoundingClientRect();
       applyPosition(rect.left, rect.top);
-    }
-
-    const resizeHandler = () => requestAnimationFrame(() => {
-      if (!state.ui || !state.ui.host.isConnected) {
-        window.removeEventListener("resize", resizeHandler);
-        return;
-      }
-      remeasureAndClamp();
     });
-    state.ui.remeasureAndClamp = remeasureAndClamp;
     window.addEventListener("resize", resizeHandler);
-    state.ui.resizeHandler = resizeHandler;
 
     function startPointerDrag(e) {
       if (e.button !== 0) return;
-      moved = false;
-      startX = e.clientX; startY = e.clientY;
+      moved = false; startX = e.clientX; startY = e.clientY;
       const rect = state.ui.host.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
       applyPosition(startLeft, startTop);
@@ -967,7 +789,7 @@
       } else {
         state.collapsed = !state.collapsed;
         storeSet("collapsed", state.collapsed);
-        refreshControls();
+        notify();
       }
     }
 
@@ -977,5 +799,4 @@
     state.ui.host.addEventListener("pointerup", endPointerDrag);
     state.ui.host.addEventListener("pointercancel", endPointerDrag);
   }
-
 })();
