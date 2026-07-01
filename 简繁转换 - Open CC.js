@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      6.1.0
+// @version      6.2.0
 // @description  Convert webpage Chinese text using opencc-wasm.
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -240,10 +240,10 @@
     return Boolean(parent && !shouldSkipElement(parent));
   }
 
-  function enqueueNode(node, queue, queuedNodes) {
-    if (queuedNodes.has(node)) return false;
-    queuedNodes.add(node);
-    queue.push(node);
+  function enqueueNode(node) {
+    if (state.queuedNodes.has(node)) return false;
+    state.queuedNodes.add(node);
+    state.queue.push(node);
     return true;
   }
 
@@ -264,7 +264,7 @@
   function enqueueTextNode(node, resetOriginal = false) {
     if (!shouldProcessTextNode(node)) return false;
     rememberOriginal(node, resetOriginal);
-    return enqueueNode(node, state.queue, state.queuedNodes);
+    return enqueueNode(node);
   }
 
   function collectTextNodes(root, resetOriginal = false) {
@@ -284,7 +284,7 @@
     let node;
     while ((node = walker.nextNode())) {
       rememberOriginal(node, resetOriginal);
-      if (enqueueNode(node, state.queue, state.queuedNodes)) count++;
+      if (enqueueNode(node)) count++;
     }
     return count;
   }
@@ -302,7 +302,7 @@
         (ns.convertedText !== null && shouldProcessTextNode(node));
       if (!needsProcess) continue;
       if (ns.convertedConfig === state.config && node.nodeValue === ns.convertedText) continue;
-      if (enqueueNode(node, state.queue, state.queuedNodes)) count++;
+      if (enqueueNode(node)) count++;
     }
     return count;
   }
@@ -341,24 +341,23 @@
     }, delay);
   }
 
-  function isStale(myGeneration, myConfig) {
-    return !state.enabled || state.generation !== myGeneration || state.config !== myConfig;
+  function currentGen() { return { generation: state.generation, config: state.config }; }
+  function isStale(gen) {
+    return !state.enabled || state.generation !== gen.generation || state.config !== gen.config;
   }
 
-  function writeConverted(converted, myGeneration, myConfig) {
+  function writeConverted(converted, gen) {
     for (const { item, result } of converted) {
-      if (isStale(myGeneration, myConfig)) break;
+      if (isStale(gen)) break;
       const currentState = nodeStates.get(item.node);
       if (currentState !== item.state || item.state.version !== item.version) {
-        if (item.node.isConnected && shouldProcessTextNode(item.node)) {
-          enqueueNode(item.node, state.queue, state.queuedNodes);
-        }
+        if (item.node.isConnected && shouldProcessTextNode(item.node)) enqueueNode(item.node);
         continue;
       }
       if (!item.node.isConnected || !shouldProcessTextNode(item.node)) continue;
       const convertedText = String(result);
       try {
-        item.state.convertedConfig = myConfig;
+        item.state.convertedConfig = gen.config;
         item.state.convertedText = convertedText;
         if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
       } catch (err) {
@@ -379,10 +378,10 @@
     }
   }
 
-  async function convertChunk(chunk, converter, myQueue, myQueuedNodes, myGeneration, myConfig) {
+  async function convertChunk(chunk, converter, gen) {
     const converted = [];
     for (const item of chunk) {
-      if (isStale(myGeneration, myConfig)) break;
+      if (isStale(gen)) break;
       let result;
       try {
         result = await converter(item.original);
@@ -395,17 +394,17 @@
           console.warn("[OpenCC-WASM userscript] Skipping node after repeated failures:", item.node.nodeValue);
           continue;
         }
-        enqueueNode(item.node, myQueue, myQueuedNodes);
+        enqueueNode(item.node);
         if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
           if (converted.length) {
             stopObserving(false);
-            writeConverted(converted, myGeneration, myConfig);
-            if (!isStale(myGeneration, myConfig)) startObserving();
+            writeConverted(converted, gen);
+            if (!isStale(gen)) startObserving();
           }
           setStatus("Conversion failed", false, true);
           clearQueue();
           state.converterErrorCount = 0;
-          converterCache.delete(myConfig);
+          converterCache.delete(gen.config);
           return { fatal: true };
         }
         await new Promise(resolve => setTimeout(resolve, CONVERTER_ERROR_COOLDOWN_MS * state.converterErrorCount));
@@ -421,62 +420,54 @@
     if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
     if (!state.queue.length) { setStatus(STATUS_ON_PREFIX + state.config); return; }
     state.processing = true;
-    state.processingDone = new Promise(r => { state.processingDone_resolve = r; });
-    const myGeneration = state.generation;
-    const myConfig = state.config;
-    let myQueue = state.queue;
-    let myQueuedNodes = state.queuedNodes;
+    const { promise, resolve } = Promise.withResolvers();
+    state.processingDone = promise;
+    state.processingDone_resolve = resolve;
+    const gen = currentGen();
     try {
-      setStatus(`Loading ${myConfig}…`, true);
-      const converter = await loadConverterOrFail(myConfig);
+      setStatus(`Loading ${gen.config}…`, true);
+      const converter = await loadConverterOrFail(gen.config);
       if (converter?.configFailed) {
-        setStatus(`Config '${myConfig}' failed – ${converter.message}`, false, true);
+        setStatus(`Config '${gen.config}' failed – ${converter.message}`, false, true);
         clearQueue();
         return;
       }
       state.moduleLoadErrorCount = 0;
       state.converterErrorCount = 0;
       state.loadDisabled = false;
-      if (isStale(myGeneration, myConfig)) return;
+      if (isStale(gen)) return;
 
       let didWork = true;
       let chunkCounter = 0;
-      while (!isStale(myGeneration, myConfig) && didWork) {
-        myQueue = state.queue;
-        myQueuedNodes = state.queuedNodes;
+      while (!isStale(gen) && didWork) {
         didWork = false;
         const chunk = [];
-        while (myQueue.length && chunk.length < CONVERT_CHUNK_SIZE) {
-          const node = myQueue.shift();
-          myQueuedNodes.delete(node);
+        while (state.queue.length && chunk.length < CONVERT_CHUNK_SIZE) {
+          const node = state.queue.shift();
+          state.queuedNodes.delete(node);
           if (!node.isConnected || !shouldProcessTextNode(node)) continue;
           const ns = nodeStates.get(node) || rememberOriginal(node, false);
           if (!ns.original || !HAS_HAN.test(ns.original)) continue;
-          if (ns.convertedConfig === myConfig && node.nodeValue === ns.convertedText) continue;
+          if (ns.convertedConfig === gen.config && node.nodeValue === ns.convertedText) continue;
           chunk.push({ node, state: ns, version: ns.version, original: ns.original });
         }
         if (!chunk.length) { await yieldToMain(); continue; }
         didWork = true;
         chunkCounter++;
-        if (chunkCounter % 3 === 0 || myQueue.length === 0) {
-          setStatus(`Converting… ${myQueue.length} left`, true);
+        if (chunkCounter % 3 === 0 || state.queue.length === 0) {
+          setStatus(`Converting… ${state.queue.length} left`, true);
         }
-        const { converted, fatal } = await convertChunk(
-          chunk, converter, myQueue, myQueuedNodes, myGeneration, myConfig
-        );
+        const { converted, fatal } = await convertChunk(chunk, converter, gen);
         if (fatal) return;
-
-        if (isStale(myGeneration, myConfig)) break;
+        if (isStale(gen)) break;
 
         stopObserving(false);
-        writeConverted(converted, myGeneration, myConfig);
-        if (!isStale(myGeneration, myConfig)) startObserving();
+        writeConverted(converted, gen);
+        if (!isStale(gen)) startObserving();
         await yieldToMain();
       }
 
-      if (!isStale(myGeneration, myConfig)){
-        setStatus(STATUS_ON_PREFIX + myConfig);
-      }
+      if (!isStale(gen)) setStatus(STATUS_ON_PREFIX + gen.config);
     } catch (err) {
       const isModuleError = err?.kind === "module_load" || !openccModule;
       if (isModuleError) {
@@ -501,7 +492,7 @@
         clearQueue();
       }
     } finally {
-      if (!isStale(myGeneration, myConfig)) {
+      if (!isStale(gen)) {
         const pending = observer.takeRecords();
         if (pending.length) handleMutations(pending);
       }
@@ -514,11 +505,8 @@
       if (state.enabled) {
         const delay = state._retryDelay ?? 0;
         state._retryDelay = null;
-        if (delay > 0) {
-          scheduleFullScan(delay);
-        } else if (state.queue.length) {
-          scheduleProcess(0);
-        }
+        if (delay > 0) scheduleFullScan(delay);
+        else if (state.queue.length) scheduleProcess(0);
       } else {
         clearQueue();
       }
@@ -537,10 +525,8 @@
           if (ns) {
             if (node.nodeValue === ns.convertedText) continue;
             rememberOriginal(node, true);
-            if (enqueueNode(node, state.queue, state.queuedNodes)) enqueued++;
-          } else {
-            if (enqueueTextNode(node, true)) enqueued++;
-          }
+            if (enqueueNode(node)) enqueued++;
+          } else if (enqueueTextNode(node, true)) enqueued++;
         } else {
           nodeStates.delete(node);
         }
@@ -586,9 +572,7 @@
       }
       const ns = nodeStates.get(node);
       if (ns) {
-        if (node.isConnected && node.nodeValue !== ns.original) {
-          node.nodeValue = ns.original;
-        }
+        if (node.isConnected && node.nodeValue !== ns.original) node.nodeValue = ns.original;
         ns.convertedConfig = null;
         ns.convertedText = null;
         ns.version++;
@@ -637,10 +621,7 @@
 
   function setConfig(nextConfig) {
     if (!CONFIG_VALUES.has(nextConfig)) return;
-    if (state.toggling) {
-      state.pendingConfig = nextConfig;
-      return;
-    }
+    if (state.toggling) { state.pendingConfig = nextConfig; return; }
     if (nextConfig === state.config) { refreshControls(); return; }
     state.config = nextConfig;
     storeSet("config", state.config);
@@ -655,27 +636,6 @@
     } else setStatus("Off");
   }
 
-  function hexToRgba(hex, alpha) {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    return `rgba(${r},${g},${b},${alpha})`;
-  }
-
-  function buildCategoryColorCSS() {
-    const tabRules = CONFIG_GROUPS.map(g =>
-      `.cat-btn[data-cat="${g.id}"]{--cat-color:${g.color};--cat-color-alpha:${hexToRgba(g.color, .12)}}`
-    ).join("\n");
-    const selectionRules = CONFIG_GROUPS.map((g, i) => {
-      const decl = `--active-cat-bg:${hexToRgba(g.color, .12)};--active-cat-border:${hexToRgba(g.color, .28)}`;
-      const prefix = i === 0
-        ? `.categories:has([data-cat="${g.id}"].active)~.body-right .config-item.selected,\n`
-        : "";
-      return `${prefix}.body:has([data-cat="${g.id}"].active) .config-item.selected{${decl}}`;
-    }).join("\n");
-    return `${tabRules}\n${selectionRules}`;
-  }
-
   function createPanel() {
     if (document.getElementById(PANEL_ID)) return;
     const host = document.createElement("div");
@@ -684,8 +644,9 @@
     document.body.appendChild(host);
     const root = host.attachShadow({ mode: "open" });
 
-    const style = document.createElement("style");
-    style.textContent = `:host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC","SF Pro Display",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(12,12,20,.85);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.08);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a;anchor-name:--fab-anchor;transition:left .3s cubic-bezier(0.2,0.8,0.2,1),top .3s cubic-bezier(0.2,0.8,0.2,1)}
+    root.innerHTML = `
+<style>
+:host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC","SF Pro Display",system-ui,-apple-system,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(12,12,20,.85);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.08);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a;anchor-name:--fab-anchor;transition:left .3s cubic-bezier(0.2,0.8,0.2,1),top .3s cubic-bezier(0.2,0.8,0.2,1)}
 :host(.dragging){-webkit-user-select:none;user-select:none;transition:none}
 *{box-sizing:border-box;margin:0;padding:0}
 @keyframes dotBlink{0%,100%{opacity:1;box-shadow:0 0 6px 1px var(--warning)}50%{opacity:.4;box-shadow:0 0 2px 0px var(--warning)}}
@@ -701,10 +662,13 @@
 .fab[hidden]{display:none!important}
 .fab:has(.fab-dot.busy){box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 2px var(--warning),inset 0 1px 0 rgba(255,255,255,0.12)}
 .fab-inner{font-size:18px;line-height:1;font-weight:800;background:linear-gradient(135deg,#a78bfa,#67e8f9);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border-radius:50%;border:1.5px solid rgba(10,10,18,.9);background:var(--text-3);transition:background .3s ease,box-shadow .3s ease}
-.fab-dot.on{background:var(--success);animation:breathe 3s ease-in-out infinite}
-.fab-dot.busy{background:var(--warning);animation:dotBlink 1.2s ease-in-out infinite}
-.fab-dot.error{background:var(--danger);animation:dotBlink 1.2s ease-in-out infinite,shake 0.5s ease-in-out}
+
+.fab-dot,.header-dot{border-radius:50%;background:var(--text-3);transition:background .3s ease,box-shadow .3s ease}
+.fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border:1.5px solid rgba(10,10,18,.9)}
+.header-dot{width:7px;height:7px;flex-shrink:0}
+.fab-dot.on,.header-dot.on{background:var(--success);animation:breathe 3s ease-in-out infinite}
+.fab-dot.busy,.header-dot.busy{background:var(--warning);animation:dotBlink 1.2s ease-in-out infinite}
+.fab-dot.error,.header-dot.error{background:var(--danger);animation:dotBlink 1.2s ease-in-out infinite,shake 0.5s ease-in-out}
 
 .panel{width:320px;z-index:1;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 0 0 1px var(--primary-glow),0 24px 64px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,0.08),inset 0 0 0 1px rgba(255,255,255,0.03);overflow:hidden;opacity:1;transform:translateY(0) scale(1);transition:opacity 0.35s cubic-bezier(0.16,1,0.3,1),transform 0.55s cubic-bezier(0.34,1.8,0.64,1),box-shadow 0.4s ease,display .3s allow-discrete;position:fixed;position-anchor:--fab-anchor;position-area:block-end span-inline-end;position-try-fallbacks:block-end span-inline-start,block-start span-inline-end,block-start span-inline-start;margin:4px}
 @starting-style{.panel{opacity:0;transform:translateY(24px) scale(0.92) translateZ(0);box-shadow:0 4px 12px rgba(0,0,0,0.2)}}
@@ -715,10 +679,6 @@
 
 .header{display:flex;align-items:center;gap:8px;padding:12px 14px 11px;cursor:grab;user-select:none;border-bottom:1px solid var(--border)}
 .header:active{cursor:grabbing}
-.header-dot{width:7px;height:7px;border-radius:50%;background:var(--text-3);flex-shrink:0;transition:background .3s,box-shadow .3s}
-.header-dot.on{background:var(--success);animation:breathe 3s ease-in-out infinite}
-.header-dot.busy{background:var(--warning);animation:dotBlink 1.2s ease-in-out infinite}
-.header-dot.error{background:var(--danger);animation:dotBlink 1.2s ease-in-out infinite,shake 0.5s ease-in-out}
 .header-label{font-size:13px;font-weight:800;color:var(--text-1);letter-spacing:.02em;flex-shrink:0}
 .header-status{flex:1;font-size:12px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;transition:color .3s;font-variant-numeric:tabular-nums;letter-spacing:0.02em}
 .header-status.busy{color:var(--warning)}
@@ -731,9 +691,8 @@
 .cat-btn{flex:1;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--text-3);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:all .2s cubic-bezier(0.2,0.8,0.2,1);display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1.25;text-align:center;position:relative}
 .cat-btn:hover{color:var(--text-2);background:var(--bg-card)}
 .cat-btn::before{content:"";position:absolute;left:-1px;top:20%;bottom:20%;width:3px;border-radius:2px;background:var(--cat-color);opacity:0;transform:scaleY(0.5);transition:all .25s cubic-bezier(0.34,1.56,0.64,1)}
-.cat-btn.active{color:var(--text-1);background:var(--cat-color-alpha)}
+.cat-btn.active{color:var(--text-1);background:color-mix(in srgb, var(--cat-color) 12%, transparent)}
 .cat-btn.active::before{opacity:1;transform:scaleY(1)}
-${buildCategoryColorCSS()}
 
 .body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}
 .config-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;mask-image:linear-gradient(to bottom,transparent,black 16px,black calc(100% - 16px),transparent);-webkit-mask-image:linear-gradient(to bottom,transparent,black 16px,black calc(100% - 16px),transparent)}
@@ -747,7 +706,7 @@ ${buildCategoryColorCSS()}
 .config-item:hover{background:var(--bg-card);border-color:var(--border)}
 .config-item::before{content:"";position:absolute;left:0;top:10%;bottom:10%;width:3px;border-radius:3px;background:linear-gradient(to bottom,transparent,var(--primary),transparent);opacity:0;transform:scaleY(0);transition:opacity 0.25s ease,transform 0.4s cubic-bezier(0.34,1.8,0.64,1)}
 .config-item:hover::before{opacity:0.7;transform:scaleY(1)}
-.config-item.selected{background:var(--active-cat-bg,rgba(124,106,247,.1));border-color:var(--active-cat-border,rgba(124,106,247,.25))}
+.categories:has(.cat-btn.active) ~ .body-right .config-item.selected{background:color-mix(in srgb, var(--active-cat-color, var(--primary)) 12%, transparent);border-color:color-mix(in srgb, var(--active-cat-color, var(--primary)) 28%, transparent)}
 
 .config-radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--text-3);flex-shrink:0;margin-top:2px;display:flex;align-items:center;justify-content:center;transition:border-color .15s}
 .config-item.selected .config-radio{border-color:var(--primary);box-shadow:0 0 0 3px rgba(124,106,247,.15)}
@@ -767,45 +726,36 @@ ${buildCategoryColorCSS()}
 .footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
 .footer-version{font-size:11px;color:var(--text-2);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
 .footer-hint{font-size:10px;color:var(--text-3);opacity:.45;letter-spacing:.03em}
-`;
+</style>
+<div class="fab" title="OpenCC-WASM — 拖拽移动"><div class="fab-inner">文</div><div class="fab-dot"></div></div>
+<div class="panel" hidden>
+  <div class="header">
+    <div class="header-dot"></div>
+    <span class="header-label">OpenCC</span>
+    <div class="header-status"></div>
+  </div>
+  <div class="body">
+    <div class="body-left"><div class="categories"></div></div>
+    <div class="body-right">
+      <div class="config-list"></div>
+      <button class="btn" type="button"></button>
+    </div>
+  </div>
+  <div class="footer">
+    <span class="footer-version">opencc-wasm ${OPENCC_LIB_VERSION}</span>
+    <span class="footer-hint">拖拽移动</span>
+  </div>
+</div>`;
 
-    const DOM_PROPS = new Set(["className", "title", "hidden", "type", "textContent", "htmlFor"]);
-    function el(tag, attrs = {}, ...children) {
-      const node = document.createElement(tag);
-      for (const [k, v] of Object.entries(attrs)) {
-        if (DOM_PROPS.has(k)) node[k] = v;
-        else node.setAttribute(k, v);
-      }
-      for (const child of children) {
-        node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
-      }
-      return node;
-    }
-
-    const fabDot = el("div", { className: "fab-dot" });
-    const fab = el("div", { className: "fab", title: "OpenCC-WASM — 拖拽移动" },
-                       el("div", { className: "fab-inner" }, "文"), fabDot);
-
-    const headerDot = el("div", { className: "header-dot" });
-    const statusEl = el("div", { className: "header-status" });
-    const header = el("div", { className: "header" },
-                       headerDot, el("span", { className: "header-label" }, "OpenCC"), statusEl);
-
-    const categoriesEl = el("div", { className: "categories" });
-    const configList = el("div", { className: "config-list" });
-    const toggle = el("button", { className: "btn" });
-    const bodyEl = el("div", { className: "body" },
-      el("div", { className: "body-left" }, categoriesEl),
-      el("div", { className: "body-right" }, configList, toggle),
-    );
-
-    const footer = el("div", { className: "footer" },
-      el("span", { className: "footer-version" }, `opencc-wasm ${OPENCC_LIB_VERSION}`),
-      el("span", { className: "footer-hint" }, "拖拽移动"),
-    );
-
-    const panel = el("div", { className: "panel" }, header, bodyEl, footer);
-    panel.hidden = true;
+    const fab = root.querySelector(".fab");
+    const fabDot = root.querySelector(".fab-dot");
+    const panel = root.querySelector(".panel");
+    const header = root.querySelector(".header");
+    const headerDot = root.querySelector(".header-dot");
+    const statusEl = root.querySelector(".header-status");
+    const categoriesEl = root.querySelector(".categories");
+    const configList = root.querySelector(".config-list");
+    const toggle = root.querySelector(".btn");
 
     panel.addEventListener("transitionend", (e) => {
       if (e.propertyName === "opacity" && panel.classList.contains("collapsing")) {
@@ -814,10 +764,6 @@ ${buildCategoryColorCSS()}
         state.ui.fab.hidden = false;
       }
     });
-
-    root.appendChild(style);
-    root.appendChild(fab);
-    root.appendChild(panel);
 
     state.ui = {
       host, root, status: statusEl, configList,
@@ -832,6 +778,7 @@ ${buildCategoryColorCSS()}
       btn.className = "cat-btn";
       btn.dataset.cat = group.id;
       btn.textContent = group.label;
+      btn.style.setProperty("--cat-color", group.color);
       btn.addEventListener("click", () => {
         state.ui.activeCategory = group.id;
         populateConfigList();
@@ -881,6 +828,7 @@ ${buildCategoryColorCSS()}
     list.classList.remove("switching");
     void list.offsetWidth; // Force a reflow so removing then re-adding the class restarts the CSS animation.
     list.classList.add("switching");
+    state.ui.categories.style.setProperty("--active-cat-color", group.color);
     for (const [value, label] of group.configs) {
       const item = document.createElement("div");
       item.className = "config-item" + (value === state.config ? " selected" : "");
@@ -914,9 +862,7 @@ ${buildCategoryColorCSS()}
 
     if (state.collapsed) {
       unbindOutsideClick();
-      if (!state.ui.panel.hidden) {
-        state.ui.panel.classList.add("collapsing");
-      }
+      if (!state.ui.panel.hidden) state.ui.panel.classList.add("collapsing");
     } else {
       bindOutsideClick();
       state.ui.fab.hidden = true;
@@ -950,17 +896,16 @@ ${buildCategoryColorCSS()}
 
   function setupDrag() {
     if (!state.ui) return;
-    let startX, startY, startLeft, startTop, moved = false;
     const DRAG_THRESHOLD = 8;
     const savedPos = storeGet("panelPos", null);
     let cachedHostW = state.ui.host.offsetWidth || 52;
     let cachedHostH = state.ui.host.offsetHeight || 52;
+    let startX = 0, startY = 0, startLeft = 0, startTop = 0, moved = false;
+
     requestAnimationFrame(() => {
       cachedHostW = state.ui.host.offsetWidth || cachedHostW;
       cachedHostH = state.ui.host.offsetHeight || cachedHostH;
-      if (savedPos && typeof savedPos.left === "number") {
-        applyPosition(savedPos.left, savedPos.top);
-      }
+      if (savedPos && typeof savedPos.left === "number") applyPosition(savedPos.left, savedPos.top);
     });
 
     function applyPosition(left, top) {
@@ -971,7 +916,6 @@ ${buildCategoryColorCSS()}
       state.ui.host.style.left = Math.max(0, Math.min(left, maxL)) + "px";
       state.ui.host.style.top = Math.max(0, Math.min(top, maxT)) + "px";
     }
-
 
     function remeasureAndClamp() {
       if (!state.ui || !state.ui.host.isConnected) return;
@@ -992,22 +936,31 @@ ${buildCategoryColorCSS()}
     window.addEventListener("resize", resizeHandler);
     state.ui.resizeHandler = resizeHandler;
 
-    function startDrag(clientX, clientY) {
+    function startPointerDrag(e) {
+      if (e.button !== 0) return;
       moved = false;
-      startX = clientX; startY = clientY;
+      startX = e.clientX; startY = e.clientY;
       const rect = state.ui.host.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
       applyPosition(startLeft, startTop);
+      state.ui.host.setPointerCapture(e.pointerId);
+      state.ui.host.classList.add("dragging");
+      e.preventDefault();
     }
 
-    function onMoveLogic(clientX, clientY) {
-      const dx = clientX - startX, dy = clientY - startY;
+    function onPointerMove(e) {
+      if (!state.ui.host.hasPointerCapture(e.pointerId)) return;
+      const dx = e.clientX - startX, dy = e.clientY - startY;
       if (!moved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
       moved = true;
       applyPosition(startLeft + dx, startTop + dy);
     }
 
-    function onUpLogic() {
+    function endPointerDrag(e) {
+      if (!state.ui.host.hasPointerCapture(e.pointerId)) return;
+      state.ui.host.releasePointerCapture(e.pointerId);
+      state.ui.host.classList.remove("dragging");
+      if (e.type !== "pointerup") return;
       if (moved) {
         const rect = state.ui.host.getBoundingClientRect();
         storeSet("panelPos", { left: rect.left, top: rect.top });
@@ -1016,26 +969,6 @@ ${buildCategoryColorCSS()}
         storeSet("collapsed", state.collapsed);
         refreshControls();
       }
-    }
-
-    function onPointerMove(e) {
-      if (!state.ui.host.hasPointerCapture(e.pointerId)) return;
-      onMoveLogic(e.clientX, e.clientY);
-    }
-
-    function endPointerDrag(e) {
-      if (!state.ui.host.hasPointerCapture(e.pointerId)) return;
-      state.ui.host.releasePointerCapture(e.pointerId);
-      state.ui.host.classList.remove("dragging");
-      if (e.type === "pointerup") onUpLogic();
-    }
-
-    function startPointerDrag(e) {
-      if (e.button !== 0) return;
-      startDrag(e.clientX, e.clientY);
-      state.ui.host.setPointerCapture(e.pointerId);
-      state.ui.host.classList.add("dragging");
-      e.preventDefault();
     }
 
     state.ui.fab.addEventListener("pointerdown", startPointerDrag);
