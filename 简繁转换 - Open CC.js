@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      7.0.3
+// @version      7.2.0
 // @description  Convert webpage Chinese text using opencc-wasm. 
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -15,10 +15,11 @@
 (function () {
   "use strict";
 
-  const OPENCC_LIB_VERSION = "0.10.0";
+  const OPENCC_LIB_VERSION = "0.12.0";
   const OPENCC_ESM_URL = `https://cdn.jsdelivr.net/npm/opencc-wasm@${OPENCC_LIB_VERSION}/dist/esm/index.js`;
   const DEFAULT_CONFIG = "t2s";
   const DEFAULT_ENABLED = true;
+  const DEFAULT_INCLUDE_TOFU_RISK = true; // matches opencc-wasm's own default
   const CONVERT_CHUNK_SIZE = 300;
   const RESTORE_YIELD_EVERY_N_NODES = 300;
   const PROCESS_DEBOUNCE_MS = 80;
@@ -75,6 +76,7 @@
 
   const state = {
     config: DEFAULT_CONFIG, enabled: DEFAULT_ENABLED, collapsed: false,
+    includeTofuRisk: DEFAULT_INCLUDE_TOFU_RISK,
 
     queue: [], queuedNodes: new WeakSet(), processing: false, generation: 0,
     processingDone: Promise.resolve(), processingDone_resolve: null,
@@ -108,6 +110,7 @@
     state.config = readConfig();
     state.enabled = storeGet("enabled", DEFAULT_ENABLED);
     state.collapsed = storeGet("collapsed", false);
+    state.includeTofuRisk = Boolean(storeGet("includeTofuRisk", DEFAULT_INCLUDE_TOFU_RISK));
     state.status.text = state.enabled ? STATUS_ON_PREFIX + state.config : "Off";
 
     if (document.contentType && !/html/i.test(document.contentType)) return;
@@ -140,7 +143,7 @@
     return { giveUp: false, delayMs: MODULE_LOAD_RETRY_BASE_MS * state.moduleLoadErrorCount };
   }
 
-  async function getConverter(configName) {
+  async function getConverter(configName, includeTofuRiskDictionaries = true) {
     if (!openccModulePromise) {
       openccModulePromise = import(OPENCC_ESM_URL).then(mod => {
         openccModule = mod.default || mod;
@@ -154,21 +157,22 @@
       });
     }
     await openccModulePromise;
-    if (converterCache.has(configName)) return converterCache.get(configName);
+    const cacheKey = `${configName}::tofu=${includeTofuRiskDictionaries}`;
+    if (converterCache.has(cacheKey)) return converterCache.get(cacheKey);
     
     const buildPromise = (async () => {
-      const converter = openccModule.Converter({ config: configName });
+      const converter = openccModule.Converter({ config: configName, includeTofuRiskDictionaries });
       await converter(WARMUP_TEXT);
       return converter;
     })();
     
-    converterCache.set(configName, buildPromise);
+    converterCache.set(cacheKey, buildPromise);
     try {
       const converter = await buildPromise;
-      converterCache.set(configName, Promise.resolve(converter));
+      converterCache.set(cacheKey, Promise.resolve(converter));
       return converter;
     } catch (err) {
-      converterCache.delete(configName);
+      converterCache.delete(cacheKey);
       const e = new Error(`Build converter failed '${configName}': ${err?.message ?? err}`);
       e.kind = "converter_init"; e.config = configName;
       throw e;
@@ -218,7 +222,7 @@
   function rememberOriginal(node, resetOriginal = false) {
     let entry = nodeStates.get(node);
     if (!entry) {
-      entry = { original: node.nodeValue, version: INITIAL_NODE_VERSION, convertedConfig: null, convertedText: null, errorCount: 0 };
+      entry = { original: node.nodeValue, version: INITIAL_NODE_VERSION, convertedConfig: null, convertedTofuRisk: null, convertedText: null, errorCount: 0 };
       nodeStates.set(node, entry);
     } else if (resetOriginal) {
       entry.original = node.nodeValue;
@@ -261,7 +265,7 @@
         if (!ns) return false;
         const needsProcess = (ns.original && HAS_HAN.test(ns.original)) || (ns.convertedText !== null && shouldProcessTextNode(n));
         if (!needsProcess) return false;
-        return !(ns.convertedConfig === state.config && n.nodeValue === ns.convertedText);
+        return !(ns.convertedConfig === state.config && ns.convertedTofuRisk === state.includeTofuRisk && n.nodeValue === ns.convertedText);
       }
     );
   }
@@ -300,8 +304,8 @@
     }, delay);
   }
 
-  const currentGen = () => ({ generation: state.generation, config: state.config });
-  const isStale = (gen) => !state.enabled || state.generation !== gen.generation || state.config !== gen.config;
+  const currentGen = () => ({ generation: state.generation, config: state.config, includeTofuRisk: state.includeTofuRisk });
+  const isStale = (gen) => !state.enabled || state.generation !== gen.generation || state.config !== gen.config || state.includeTofuRisk !== gen.includeTofuRisk;
 
   function writeConverted(converted, gen) {
     for (const { item, result } of converted) {
@@ -314,6 +318,7 @@
       const convertedText = String(result);
       try {
         item.state.convertedConfig = gen.config;
+        item.state.convertedTofuRisk = gen.includeTofuRisk;
         item.state.convertedText = convertedText;
         if (item.node.nodeValue !== convertedText) item.node.nodeValue = convertedText;
       } catch {
@@ -337,7 +342,8 @@
           if (item.state.errorCount < MAX_NODE_CONVERT_ERRORS) enqueueNode(item.node);
           if (converted.length) { stopObserving(false); writeConverted(converted, gen); if (!isStale(gen)) startObserving(); }
           setStatus("Conversion failed", false, true);
-          clearQueue(); state.converterErrorCount = 0; converterCache.delete(gen.config);
+          clearQueue(); state.converterErrorCount = 0;
+          converterCache.delete(`${gen.config}::tofu=${gen.includeTofuRisk}`);
           return { fatal: true };
         }
         if (item.state.errorCount >= MAX_NODE_CONVERT_ERRORS) continue;
@@ -363,7 +369,7 @@
     try {
       setStatus(`Loading ${gen.config}…`, true);
       let converter;
-      try { converter = await getConverter(gen.config); }
+      try { converter = await getConverter(gen.config, gen.includeTofuRisk); }
       catch (err) {
         if (err?.kind === "converter_init" && err.config === gen.config) {
           state.brokenConfigs.add(gen.config);
@@ -387,7 +393,7 @@
           if (!node.isConnected || !shouldProcessTextNode(node)) continue;
           const ns = nodeStates.get(node) || rememberOriginal(node, false);
           if (!ns.original || !HAS_HAN.test(ns.original)) continue;
-          if (ns.convertedConfig === gen.config && node.nodeValue === ns.convertedText) continue;
+          if (ns.convertedConfig === gen.config && ns.convertedTofuRisk === gen.includeTofuRisk && node.nodeValue === ns.convertedText) continue;
           chunk.push({ node, state: ns, version: ns.version, original: ns.original });
         }
         if (!chunk.length) { await yieldToMain(); continue; }
@@ -533,6 +539,20 @@
     notify();
   }
 
+  function setIncludeTofuRisk(next) {
+    next = Boolean(next);
+    if (next === state.includeTofuRisk) { notify(); return; }
+    state.includeTofuRisk = next;
+    storeSet("includeTofuRisk", next);
+    state.generation++; clearQueue();
+    if (state.enabled) {
+      setStatus(`Switching…`, true);
+      const count = requeueForConfigChange();
+      if (count > 0) scheduleProcess(0); else setStatus(STATUS_ON_PREFIX + state.config);
+    } else setStatus("Off");
+    notify();
+  }
+
   function setStatus(text, busy = false, error = false) {
     state.status = { text, busy, error };
     notify();
@@ -620,6 +640,13 @@
 .btn-primary{background:linear-gradient(135deg,#6d5af0,#9b6fff);border-color:rgba(150,120,255,.25);color:#fff}
 .btn-danger{background:linear-gradient(135deg,#e8415a,#f07);border-color:rgba(240,80,100,.25);color:#fff}
 
+.tofu-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 2px;cursor:pointer;user-select:none}
+.tofu-label{font-size:11px;color:var(--text-2);line-height:1.3}
+.tofu-switch{width:28px;height:16px;border-radius:9px;background:var(--bg-card);border:1px solid var(--border);position:relative;flex-shrink:0;transition:background .18s ease,border-color .18s ease}
+.tofu-switch::after{content:"";position:absolute;top:1px;left:1px;width:12px;height:12px;border-radius:50%;background:var(--text-3);transition:transform .18s cubic-bezier(0.34,1.56,0.64,1),background .18s ease}
+.tofu-row.on .tofu-switch{background:color-mix(in srgb, var(--primary) 35%, transparent);border-color:rgba(150,120,255,.35)}
+.tofu-row.on .tofu-switch::after{transform:translateX(12px);background:#fff}
+
 .footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
 .footer-version{font-size:11px;color:var(--text-2);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
 .footer-hint{font-size:10px;color:var(--text-3);opacity:.45;letter-spacing:.03em}
@@ -635,6 +662,10 @@
     <div class="body-left"><div class="categories"></div></div>
     <div class="body-right">
       <div class="config-list" role="radiogroup" aria-label="OpenCC conversion configs"></div>
+      <div class="tofu-row" role="switch" tabindex="0" title="Include dictionaries that may produce rare/placeholder (tofu) characters, matching official OpenCC default">
+        <span class="tofu-label">词汇字典 (可能含罕见字)</span>
+        <div class="tofu-switch"></div>
+      </div>
       <button class="btn" type="button"></button>
     </div>
   </div>
@@ -649,6 +680,7 @@
       status: root.querySelector(".header-status"),
       configList: root.querySelector(".config-list"),
       categories: root.querySelector(".categories"),
+      tofuRow: root.querySelector(".tofu-row"),
       toggle: root.querySelector(".btn"),
       fab: root.querySelector(".fab"),
       panel: root.querySelector(".panel"),
@@ -682,6 +714,11 @@
 
     populateConfigList();
     updateCategoryTabs();
+
+    state.ui.tofuRow.addEventListener("click", () => setIncludeTofuRisk(!state.includeTofuRisk));
+    state.ui.tofuRow.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setIncludeTofuRisk(!state.includeTofuRisk); }
+    });
 
     state.ui.toggle.addEventListener("click", async () => {
       state.ui.toggle.disabled = true;
@@ -736,7 +773,7 @@
 
   function renderUI() {
     if (!state.ui) return;
-    const { ui, collapsed, enabled, config, status } = state;
+    const { ui, collapsed, enabled, config, status, includeTofuRisk } = state;
     
     if (collapsed) {
       if (ui.panel.matches(":popover-open")) ui.panel.hidePopover();
@@ -752,6 +789,9 @@
       updateConfigListSelection();
     }
     updateCategoryTabs();
+
+    ui.tofuRow.classList.toggle("on", includeTofuRisk);
+    ui.tofuRow.setAttribute("aria-checked", includeTofuRisk ? "true" : "false");
 
     ui.toggle.textContent = enabled ? "关" : "开";
     ui.toggle.classList.toggle("btn-danger", enabled);
