@@ -19,7 +19,7 @@
   const OPENCC_ESM_URL = `https://cdn.jsdelivr.net/npm/opencc-wasm@${OPENCC_LIB_VERSION}/dist/esm/index.js`;
   const DEFAULT_CONFIG = "t2s";
   const DEFAULT_ENABLED = true;
-  const DEFAULT_INCLUDE_TOFU_RISK = true; // matches opencc-wasm's own default
+  const DEFAULT_INCLUDE_TOFU_RISK = true;
   const CONVERT_CHUNK_SIZE = 300;
   const RESTORE_YIELD_EVERY_N_NODES = 300;
   const PROCESS_DEBOUNCE_MS = 80;
@@ -294,6 +294,17 @@
     }, Math.max(delay, MIN_FULL_SCAN_DELAY_MS));
   }
 
+  function scheduleModuleRetry(delay) {
+    if (!state.enabled) return;
+    if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
+    state.processTimer = setTimeout(() => {
+      state.processTimer = 0;
+      state.loadDisabled = false;
+      if (typeof scheduler?.postTask === "function") scheduler.postTask(() => processQueue(), { priority: "background" });
+      else void processQueue();
+    }, delay);
+  }
+
   function scheduleProcess(delay = PROCESS_DEBOUNCE_MS) {
     if (!state.enabled || state.loadDisabled) return;
     if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
@@ -422,6 +433,7 @@
         }
         setStatus(`Load error – retry in ${delayMs / 1000}s…`, false, true);
         state._retryDelay = delayMs;
+        state.loadDisabled = true;
       } else {
         setStatus("Internal error — see console", false, true); clearQueue();
       }
@@ -437,7 +449,7 @@
         const delay = state._retryDelay ?? 0;
         state._retryDelay = null;
         if (delay > 0) {
-          scheduleProcess(delay);
+          scheduleModuleRetry(delay);
         } else if (state.queue.length) {
           scheduleProcess(0);
         }
