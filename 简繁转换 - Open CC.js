@@ -416,7 +416,7 @@
         if (fatal) return;
         if (isStale(gen)) break;
 
-        stopObserving(false);
+        stopObserving(true);
         writeConverted(converted, gen);
         if (!isStale(gen)) startObserving();
         await yieldToMain();
@@ -645,8 +645,8 @@ button,select{font:inherit}
       <select class="config-select" aria-label="OpenCC conversion config"></select>
     </label>
     <div class="settings">
-      <div class="setting tofu-row" role="switch" tabindex="0" aria-checked="false" title="是否包含可能产生罕见字的词典">
-        <div class="setting-copy"><div class="setting-title">词汇字典</div><div class="setting-help">包含更多词汇，可能产生罕见字</div></div>
+      <div class="setting tofu-row" role="switch" tabindex="0" aria-checked="false" title="是否包含当前方案中可能产生罕见字（豆腐字）的词典条目；与「简→台繁+词汇」等方案名称中的“词汇”无关，若当前方案本身不含此类词典，切换不会有变化">
+        <div class="setting-copy"><div class="setting-title">罕见字词典</div><div class="setting-help">包含当前方案中可能产生罕见字的词典条目（部分方案可能无此类词典，切换无变化）</div></div>
         <div class="switch"></div>
       </div>
     </div>
