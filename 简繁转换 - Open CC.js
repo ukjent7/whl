@@ -580,88 +580,55 @@
 
     root.innerHTML = `
 <style>
-:host{all:initial;display:block;position:fixed;right:20px;bottom:20px;width:52px;height:52px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC","SF Pro Display",system-ui,sans-serif;--primary:#7c6af7;--primary-glow:rgba(124,106,247,.35);--danger:#f25c6e;--success:#34d399;--warning:#fbbf24;--bg:rgba(12,12,20,.85);--bg-card:rgba(255,255,255,.04);--border:rgba(255,255,255,.08);--border-strong:rgba(255,255,255,.15);--text-1:#f0f0f8;--text-2:#9898b8;--text-3:#55556a;anchor-name:--fab-anchor;transition:left .3s cubic-bezier(0.2,0.8,0.2,1),top .3s cubic-bezier(0.2,0.8,0.2,1)}
+:host{all:initial;display:block;position:fixed;right:22px;bottom:22px;width:56px;height:56px;overflow:visible;z-index:2147483647;font-family:"Noto Sans SC","SF Pro Display",system-ui,sans-serif;--accent:#8b7cff;--accent-soft:rgba(139,124,255,.18);--danger:#ff6b7d;--success:#48d597;--warning:#ffc857;--surface:rgba(16,16,28,.9);--surface-2:rgba(255,255,255,.06);--line:rgba(255,255,255,.1);--text:#f7f6ff;--muted:#aaa8c4;--dim:#69677e;anchor-name:--opencc-anchor;transition:left .25s ease,top .25s ease}
 :host(.dragging){user-select:none;transition:none}
 *{box-sizing:border-box;margin:0;padding:0}
-@keyframes dotBlink{0%,100%{opacity:1;box-shadow:0 0 6px 1px var(--warning)}50%{opacity:.4;box-shadow:0 0 2px 0px var(--warning)}}
-@keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,0.45)}50%{box-shadow:0 0 0 8px rgba(52,211,153,0)}}
-@keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-4px)}60%{transform:translateX(4px)}}
-
-.fab::before,.panel::before{content:"";position:absolute;inset:0;border-radius:inherit;background:radial-gradient(circle at 50% 0%, rgba(255,255,255,0.05), transparent 70%);pointer-events:none;mix-blend-mode:overlay;z-index:1}
-.fab-inner,.header,.body,.footer,.fab-dot,.btn{position:relative;z-index:2}
-
-.fab{position:absolute;right:0;bottom:0;width:52px;height:52px;z-index:2;border-radius:16px;border:1px solid var(--border-strong);background:var(--bg);backdrop-filter:blur(24px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform .25s cubic-bezier(0.34,1.56,0.64,1),box-shadow .2s ease;box-shadow:0 8px 32px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,0.12),inset 0 -1px 0 rgba(0,0,0,0.3)}
-.fab:hover{transform:scale(1.08) translateY(-2px)}
-.fab:active{transform:scale(0.92)}
-.fab:has(.fab-dot.busy){box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 2px var(--warning),inset 0 1px 0 rgba(255,255,255,0.12)}
-.fab-inner{font-size:18px;line-height:1;font-weight:800;background:linear-gradient(135deg,#a78bfa,#67e8f9);background-clip:text;color:transparent}
-
-.fab-dot,.header-dot{border-radius:50%;background:var(--text-3);transition:background .3s ease,box-shadow .3s ease}
-.fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border:1.5px solid rgba(10,10,18,.9)}
-.header-dot{width:7px;height:7px;flex-shrink:0}
-.fab-dot.on,.header-dot.on{background:var(--success);animation:breathe 3s ease-in-out infinite}
-.fab-dot.busy,.header-dot.busy{background:var(--warning);animation:dotBlink 1.2s ease-in-out infinite}
-.fab-dot.error,.header-dot.error{background:var(--danger);animation:dotBlink 1.2s ease-in-out infinite,shake 0.5s ease-in-out}
-
-.panel{width:320px;border-radius:18px;border:1px solid var(--border);background:var(--bg);backdrop-filter:blur(32px);box-shadow:0 0 0 1px var(--primary-glow),0 24px 64px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,0.08);overflow:hidden;position-anchor:--fab-anchor;position-area:block-end span-inline-end;margin:4px;opacity:0;transform:translateY(12px) scale(0.98);transition:opacity 0.35s cubic-bezier(0.16,1,0.3,1),transform 0.55s cubic-bezier(0.34,1.8,0.64,1),overlay 0.35s allow-discrete,display 0.35s allow-discrete}
-.panel:popover-open{opacity:1;transform:translateY(0) scale(1)}
-@starting-style{.panel:popover-open{opacity:0;transform:translateY(24px) scale(0.92)}}
+button,select{font:inherit}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(72,213,151,.35)}50%{box-shadow:0 0 0 7px rgba(72,213,151,0)}}
+@keyframes blink{50%{opacity:.45}}
+.fab{position:absolute;right:0;bottom:0;width:56px;height:56px;border:1px solid rgba(255,255,255,.18);border-radius:18px;background:linear-gradient(145deg,rgba(45,42,78,.95),rgba(17,17,29,.95));backdrop-filter:blur(22px);box-shadow:0 12px 30px rgba(0,0,0,.42),inset 0 1px rgba(255,255,255,.14);cursor:pointer;display:grid;place-items:center;transition:transform .2s ease,box-shadow .2s ease}
+.fab:hover{transform:translateY(-2px) scale(1.04);box-shadow:0 16px 34px rgba(0,0,0,.48),0 0 0 3px var(--accent-soft),inset 0 1px rgba(255,255,255,.14)}
+.fab:active{transform:scale(.95)}
+.fab-inner{font-size:20px;font-weight:800;line-height:1;background:linear-gradient(135deg,#c4b5fd,#67e8f9);background-clip:text;color:transparent}
+.fab-dot,.header-dot{border-radius:50%;background:var(--dim);transition:background .2s,box-shadow .2s}
+.fab-dot{position:absolute;top:7px;right:7px;width:8px;height:8px;border:1.5px solid #16151f}
+.header-dot{width:8px;height:8px;flex:0 0 auto}
+.fab-dot.on,.header-dot.on{background:var(--success);animation:pulse 3s ease-in-out infinite}
+.fab-dot.busy,.header-dot.busy{background:var(--warning);animation:blink 1s ease-in-out infinite}
+.fab-dot.error,.header-dot.error{background:var(--danger);animation:blink 1s ease-in-out infinite}
+.panel{width:350px;border:1px solid var(--line);border-radius:22px;background:var(--surface);backdrop-filter:blur(28px);box-shadow:0 26px 70px rgba(0,0,0,.58),0 0 0 1px var(--accent-soft),inset 0 1px rgba(255,255,255,.1);overflow:hidden;position-anchor:--opencc-anchor;position-area:block-end span-inline-end;margin:8px;opacity:0;transform:translateY(12px) scale(.97);transition:opacity .25s ease,transform .3s cubic-bezier(.2,.8,.2,1),overlay .25s allow-discrete,display .25s allow-discrete}
+.panel:popover-open{opacity:1;transform:none}
+@starting-style{.panel:popover-open{opacity:0;transform:translateY(20px) scale(.94)}}
 .panel::backdrop{background:transparent}
-.panel::after{content:"";position:absolute;inset:-60px;border-radius:40px;background:radial-gradient(ellipse 80% 50% at 50% 0%,var(--primary-glow),transparent 70%);opacity:0.5;pointer-events:none;z-index:-1;filter:blur(20px)}
-
-.header{display:flex;align-items:center;gap:8px;padding:12px 14px 11px;cursor:grab;user-select:none;border-bottom:1px solid var(--border)}
+.header{display:flex;align-items:center;gap:9px;padding:16px 18px 14px;border-bottom:1px solid var(--line);cursor:grab;user-select:none}
 .header:active{cursor:grabbing}
-.header-label{font-size:13px;font-weight:800;color:var(--text-1);letter-spacing:.02em;flex-shrink:0}
-.header-status{flex:1;font-size:12px;color:var(--text-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.header-label{font-size:14px;font-weight:800;letter-spacing:.02em;color:var(--text)}
+.header-status{margin-left:auto;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dim)}
 .header-status.busy{color:var(--warning)}
 .header-status.error{color:var(--danger)}
-
-.body{padding:10px 0 12px;display:flex;height:200px}
-.body-left{width:78px;flex-shrink:0;display:flex;flex-direction:column;padding:0 8px;gap:4px;border-right:1px solid var(--border)}
-.categories{display:flex;flex-direction:column;gap:4px;flex:1}
-
-.cat-btn{flex:1;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--text-3);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:all .2s cubic-bezier(0.2,0.8,0.2,1);display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1.25;text-align:center;position:relative}
-.cat-btn:hover{color:var(--text-2);background:var(--bg-card)}
-.cat-btn::before{content:"";position:absolute;left:-1px;top:20%;bottom:20%;width:3px;border-radius:2px;background:var(--cat-color);opacity:0;transform:scaleY(0.5);transition:all .25s cubic-bezier(0.34,1.56,0.64,1)}
-.cat-btn.active{color:var(--text-1);background:color-mix(in srgb, var(--cat-color) 12%, transparent)}
-.cat-btn.active::before{opacity:1;transform:scaleY(1)}
-
-.body-right{flex:1;display:flex;flex-direction:column;padding:0 9px;gap:8px;min-width:0}
-.config-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;mask-image:linear-gradient(to bottom,transparent,black 16px,black calc(100% - 16px),transparent)}
-.config-list::-webkit-scrollbar{width:5px}
-.config-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:10px}
-@keyframes listFade{from{opacity:0}to{opacity:1}}
-.config-list.switching{animation:listFade .15s ease}
-.config-item{position:relative;overflow:visible;display:flex;align-items:flex-start;gap:7px;padding:5px 8px;border-radius:7px;cursor:pointer;transition:background .12s,border-color .12s;border:1px solid transparent;flex-shrink:0}
-.config-item:hover{background:var(--bg-card);border-color:var(--border)}
-.config-item::before{content:"";position:absolute;left:0;top:10%;bottom:10%;width:3px;border-radius:3px;background:linear-gradient(to bottom,transparent,var(--primary),transparent);opacity:0;transform:scaleY(0);transition:opacity 0.25s ease,transform 0.4s cubic-bezier(0.34,1.8,0.64,1)}
-.config-item:hover::before{opacity:0.7;transform:scaleY(1)}
-.categories:has(.cat-btn.active) ~ .body-right .config-item.selected{background:color-mix(in srgb, var(--active-cat-color, var(--primary)) 12%, transparent);border-color:color-mix(in srgb, var(--active-cat-color, var(--primary)) 28%, transparent)}
-
-.config-radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--text-3);flex-shrink:0;margin-top:2px;display:flex;align-items:center;justify-content:center;transition:border-color .15s}
-.config-item.selected .config-radio{border-color:var(--primary);box-shadow:0 0 0 3px rgba(124,106,247,.15)}
-.config-radio::after{content:"";width:5px;height:5px;border-radius:50%;background:var(--primary);opacity:0;transform:scale(0);transition:transform .25s cubic-bezier(0.34,1.56,0.64,1),opacity .15s}
-.config-item.selected .config-radio::after{opacity:1;transform:scale(1)}
-.config-label{flex:1;min-width:0;font-size:13px;color:var(--text-2);line-height:1.45;word-break:break-all;transition:color .12s}
-.config-item.selected .config-label{color:var(--text-1)}
-
-.btn{width:calc(100% + 2px);margin-left:-1px;height:36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text-1);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;letter-spacing:.05em;transition:opacity .18s,transform .1s,background .22s ease,border-color .22s ease;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
-.btn:active{transform:scale(0.96) translateY(1px)}
-.btn::after{content:"";position:absolute;top:-50%;left:-60%;width:40%;height:200%;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.15),transparent);transform:skewX(-20deg);transition:left .6s ease;pointer-events:none}
-.btn:hover::after{left:120%}
-.btn-primary{background:linear-gradient(135deg,#6d5af0,#9b6fff);border-color:rgba(150,120,255,.25);color:#fff}
-.btn-danger{background:linear-gradient(135deg,#e8415a,#f07);border-color:rgba(240,80,100,.25);color:#fff}
-
-.tofu-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 2px;cursor:pointer;user-select:none}
-.tofu-label{font-size:11px;color:var(--text-2);line-height:1.3}
-.tofu-switch{width:28px;height:16px;border-radius:9px;background:var(--bg-card);border:1px solid var(--border);position:relative;flex-shrink:0;transition:background .18s ease,border-color .18s ease}
-.tofu-switch::after{content:"";position:absolute;top:1px;left:1px;width:12px;height:12px;border-radius:50%;background:var(--text-3);transition:transform .18s cubic-bezier(0.34,1.56,0.64,1),background .18s ease}
-.tofu-row.on .tofu-switch{background:color-mix(in srgb, var(--primary) 35%, transparent);border-color:rgba(150,120,255,.35)}
-.tofu-row.on .tofu-switch::after{transform:translateX(12px);background:#fff}
-
-.footer{padding:7px 14px 9px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.footer-version{font-size:11px;color:var(--text-2);letter-spacing:.04em;font-family:ui-monospace,"SF Mono",monospace}
-.footer-hint{font-size:10px;color:var(--text-3);opacity:.45;letter-spacing:.03em}
+.body{padding:18px}
+.eyebrow{font-size:11px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
+.config-summary{margin-top:7px;font-size:24px;font-weight:800;letter-spacing:-.03em;color:var(--text);line-height:1.15}
+.config-field{display:block;margin-top:18px}
+.config-field .eyebrow{display:block;margin-bottom:7px}
+.config-select{width:100%;height:42px;padding:0 38px 0 13px;border:1px solid var(--line);border-radius:12px;outline:none;background:var(--surface-2);color:var(--text);cursor:pointer;appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 17px) 18px,calc(100% - 12px) 18px;background-size:5px 5px,5px 5px;background-repeat:no-repeat;transition:border-color .2s,background-color .2s}
+.config-select:hover,.config-select:focus{border-color:rgba(158,145,255,.7);background-color:rgba(139,124,255,.1)}
+.config-select option,.config-select optgroup{background:#202033;color:#f7f6ff}
+.settings{display:grid;gap:10px;margin-top:14px}
+.setting{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 13px;border:1px solid var(--line);border-radius:13px;background:rgba(255,255,255,.035);cursor:pointer;user-select:none;transition:border-color .2s,background-color .2s}
+.setting:hover{border-color:rgba(158,145,255,.45);background:rgba(139,124,255,.08)}
+.setting-copy{min-width:0}.setting-title{font-size:13px;color:var(--text)}.setting-help{margin-top:3px;font-size:11px;color:var(--dim);line-height:1.35}
+.switch{width:34px;height:20px;flex:0 0 auto;border:1px solid var(--line);border-radius:20px;background:rgba(255,255,255,.08);position:relative;transition:background .2s,border-color .2s}
+.switch::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:var(--muted);transition:transform .2s cubic-bezier(.2,.8,.2,1),background .2s}
+.setting.on .switch{border-color:rgba(139,124,255,.55);background:var(--accent-soft)}
+.setting.on .switch::after{transform:translateX(14px);background:#fff}
+.btn{width:100%;height:42px;margin-top:16px;border:0;border-radius:12px;background:linear-gradient(135deg,#8273ff,#a78bfa);color:#fff;cursor:pointer;font-size:14px;font-weight:800;letter-spacing:.03em;box-shadow:0 8px 18px rgba(105,88,230,.25);transition:transform .15s,filter .2s,background .2s}
+.btn:hover{filter:brightness(1.08)}
+.btn:active{transform:scale(.98)}
+.btn:disabled{cursor:wait;opacity:.6}
+.btn.off{background:rgba(255,255,255,.08);color:var(--text);box-shadow:none}
+.footer{display:flex;align-items:center;justify-content:space-between;padding:11px 18px 13px;border-top:1px solid var(--line);color:var(--dim);font-size:10px;letter-spacing:.04em}
+.footer-hint{color:var(--muted)}
 </style>
 <div class="fab" title="OpenCC-WASM — 拖拽移动"><div class="fab-inner">文</div><div class="fab-dot"></div></div>
 <div class="panel" popover="auto">
@@ -671,27 +638,31 @@
     <div class="header-status"></div>
   </div>
   <div class="body">
-    <div class="body-left"><div class="categories"></div></div>
-    <div class="body-right">
-      <div class="config-list" role="radiogroup" aria-label="OpenCC conversion configs"></div>
-      <div class="tofu-row" role="switch" tabindex="0" title="Include dictionaries that may produce rare/placeholder (tofu) characters, matching official OpenCC default">
-        <span class="tofu-label">词汇字典 (可能含罕见字)</span>
-        <div class="tofu-switch"></div>
+    <div class="eyebrow">当前转换方案</div>
+    <div class="config-summary"></div>
+    <label class="config-field">
+      <span class="eyebrow">选择方案</span>
+      <select class="config-select" aria-label="OpenCC conversion config"></select>
+    </label>
+    <div class="settings">
+      <div class="setting tofu-row" role="switch" tabindex="0" aria-checked="false" title="是否包含可能产生罕见字的词典">
+        <div class="setting-copy"><div class="setting-title">词汇字典</div><div class="setting-help">包含更多词汇，可能产生罕见字</div></div>
+        <div class="switch"></div>
       </div>
-      <button class="btn" type="button"></button>
     </div>
+    <button class="btn" type="button"></button>
   </div>
   <div class="footer">
     <span class="footer-version">opencc-wasm ${OPENCC_LIB_VERSION}</span>
-    <span class="footer-hint">拖拽移动</span>
+    <span class="footer-hint">拖拽标题栏移动</span>
   </div>
 </div>`;
 
     state.ui = {
       host, root,
       status: root.querySelector(".header-status"),
-      configList: root.querySelector(".config-list"),
-      categories: root.querySelector(".categories"),
+      configSelect: root.querySelector(".config-select"),
+      configSummary: root.querySelector(".config-summary"),
       tofuRow: root.querySelector(".tofu-row"),
       toggle: root.querySelector(".btn"),
       fab: root.querySelector(".fab"),
@@ -699,7 +670,6 @@
       fabDot: root.querySelector(".fab-dot"),
       headerDot: root.querySelector(".header-dot"),
       header: root.querySelector(".header"),
-      activeCategory: CONFIG_INDEX.get(state.config),
     };
 
     state.ui.panel.addEventListener("toggle", (e) => {
@@ -710,22 +680,8 @@
       }
     });
 
-    for (const group of CONFIG_GROUPS) {
-      const btn = document.createElement("button");
-      btn.className = "cat-btn";
-      btn.dataset.cat = group.id;
-      btn.textContent = group.label;
-      btn.style.setProperty("--cat-color", group.color);
-      btn.addEventListener("click", () => {
-        state.ui.activeCategory = group.id;
-        populateConfigList();
-        updateCategoryTabs();
-      });
-      state.ui.categories.appendChild(btn);
-    }
-
-    populateConfigList();
-    updateCategoryTabs();
+    populateConfigOptions();
+    state.ui.configSelect.addEventListener("change", e => setConfig(e.target.value));
 
     state.ui.tofuRow.addEventListener("click", () => setIncludeTofuRisk(!state.includeTofuRisk));
     state.ui.tofuRow.addEventListener("keydown", (e) => {
@@ -743,71 +699,41 @@
     renderUI();
   }
 
-  function populateConfigList() {
-    const group = CONFIG_GROUPS.find(g => g.id === state.ui.activeCategory) ?? CONFIG_GROUPS[0];
-    const list = state.ui.configList;
-    list.innerHTML = "";
-    list.classList.remove("switching");
-    void list.offsetWidth; // Force reflow to restart animation
-    list.classList.add("switching");
-    state.ui.categories.style.setProperty("--active-cat-color", group.color);
-    for (const [value, label] of group.configs) {
-      const item = document.createElement("div");
-      item.className = "config-item" + (value === state.config ? " selected" : "");
-      item.dataset.value = value;
-      item.setAttribute("role", "radio");
-      item.setAttribute("aria-checked", value === state.config ? "true" : "false");
-      item.tabIndex = 0;
-      const radio = document.createElement("div"); radio.className = "config-radio";
-      const labelEl = document.createElement("div"); labelEl.className = "config-label"; labelEl.textContent = label;
-      item.appendChild(radio); item.appendChild(labelEl);
-      item.addEventListener("click", () => setConfig(value));
-      item.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setConfig(value); }
-      });
-      list.appendChild(item);
-    }
-  }
-
-  function updateConfigListSelection() {
-    for (const item of state.ui.configList.querySelectorAll(".config-item")){
-      const isSelected = item.dataset.value === state.config;
-      item.classList.toggle("selected", isSelected);
-      item.setAttribute("aria-checked", isSelected ? "true" : "false");
-    }
-  }
-
-  function updateCategoryTabs() {
-    for (const btn of state.ui.categories.querySelectorAll(".cat-btn")) {
-      btn.classList.toggle("active", btn.dataset.cat === state.ui.activeCategory);
+  function populateConfigOptions() {
+    const select = state.ui.configSelect;
+    select.innerHTML = "";
+    for (const group of CONFIG_GROUPS) {
+      const optgroup = document.createElement("optgroup");
+      optgroup.label = group.label;
+      for (const [value, label] of group.configs) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        optgroup.appendChild(option);
+      }
+      select.appendChild(optgroup);
     }
   }
 
   function renderUI() {
     if (!state.ui) return;
     const { ui, collapsed, enabled, config, status, includeTofuRisk } = state;
-    
+
     if (collapsed) {
       if (ui.panel.matches(":popover-open")) ui.panel.hidePopover();
-    } else {
-      if (!ui.panel.matches(":popover-open")) ui.panel.showPopover();
+    } else if (!ui.panel.matches(":popover-open")) {
+      ui.panel.showPopover();
     }
 
-    const catId = CONFIG_INDEX.get(config);
-    if (ui.activeCategory !== catId) {
-      ui.activeCategory = catId;
-      populateConfigList();
-    } else {
-      updateConfigListSelection();
-    }
-    updateCategoryTabs();
+    ui.configSelect.value = config;
+    const selected = CONFIG_GROUPS.flatMap(group => group.configs).find(([value]) => value === config);
+    ui.configSummary.textContent = selected ? selected[1] : config;
 
     ui.tofuRow.classList.toggle("on", includeTofuRisk);
     ui.tofuRow.setAttribute("aria-checked", includeTofuRisk ? "true" : "false");
 
-    ui.toggle.textContent = enabled ? "关" : "开";
-    ui.toggle.classList.toggle("btn-danger", enabled);
-    ui.toggle.classList.toggle("btn-primary", !enabled);
+    ui.toggle.textContent = enabled ? "关闭网页转换" : "开启网页转换";
+    ui.toggle.classList.toggle("off", !enabled);
 
     if (ui.status.textContent !== status.text) ui.status.textContent = status.text;
     ui.status.classList.toggle("busy", status.busy);
