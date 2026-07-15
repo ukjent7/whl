@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCC-WASM Webpage Converter
 // @namespace    https://tampermonkey.net/
-// @version      7.2.0
+// @version      7.5.0
 // @description  Convert webpage Chinese text using opencc-wasm. 
 // @author       ANY
 // @match        https://czbooks.net/*
@@ -16,7 +16,9 @@
   "use strict";
 
   const OPENCC_LIB_VERSION = "0.12.0";
-  const OPENCC_ESM_URL = `https://cdn.jsdelivr.net/npm/opencc-wasm@${OPENCC_LIB_VERSION}/dist/esm/index.js`;
+  const OPENCC_PKG_BASE = `https://cdn.jsdelivr.net/npm/opencc-wasm@${OPENCC_LIB_VERSION}/dist/`;
+  const OPENCC_ESM_URL = `${OPENCC_PKG_BASE}esm/index.js`;
+  const OPENCC_CONFIG_BASE = `${OPENCC_PKG_BASE}data/config/`;
   const DEFAULT_CONFIG = "t2s";
   const DEFAULT_ENABLED = true;
   const DEFAULT_INCLUDE_TOFU_RISK = true;
@@ -29,7 +31,7 @@
   const CONVERTER_ERROR_COOLDOWN_MS = 200;
   const MAX_NODE_CONVERT_ERRORS = 2;
   const MAX_MODULE_LOAD_ERRORS = 3;
-  const MODULE_LOAD_RETRY_BASE_MS = 2000;
+  const MODULE_LOAD_RETRY_STEP_MS = 2000;
   const PANEL_ID = "opencc-wasm-tm-panel-host";
   const STORE_PREFIX = "openccWasmUserscript.v1.";
   const WARMUP_TEXT = "的";
@@ -37,24 +39,24 @@
   const INITIAL_NODE_VERSION = 1;
 
   const CONFIG_GROUPS = [
-    { id: "s2t", label: "简→繁", color: "#f59e0b", configs: [
+    { label: "简→繁", configs: [
       ["s2t", "简 → 繁体"], ["s2twp", "简 → 台繁 + 词汇"], ["s2tw", "简 → 台繁"],
       ["s2hkp", "简 → 港繁 + 词汇"], ["s2hk", "简 → 港繁"], ["s2t_jieba", "简 → 繁体 (结巴)"],
       ["s2twp_jieba", "简 → 台繁 + 词汇 (结巴)"], ["s2tw_jieba", "简 → 台繁 (结巴)"],
       ["s2hkp_jieba", "简 → 港繁 + 词汇 (结巴)"], ["s2hk_jieba", "简 → 港繁 (结巴)"],
     ]},
-    { id: "t2s", label: "繁→简", color: "#10b981", configs: [
+    { label: "繁→简", configs: [
       ["t2s", "繁体 → 简"], ["tw2sp", "台繁 → 简 + 词汇"], ["tw2s", "台繁 → 简"],
       ["hk2sp", "港繁 → 简 + 词汇"], ["hk2s", "港繁 → 简"], ["tw2sp_jieba", "台繁 → 简 + 词汇 (结巴)"],
       ["hk2sp_jieba", "港繁 → 简 + 词汇 (结巴)"], ["t2s_cngov", "繁体 → 国标简"],
     ]},
-    { id: "tw2hk", label: "繁→繁", color: "#8b5cf6", configs: [
+    { label: "繁→繁", configs: [
       ["t2tw", "繁体 → 台繁"], ["t2hk", "繁体 → 港繁"], ["tw2t", "台繁 → 繁体"], ["hk2t", "港繁 → 繁体"],
     ]},
-    { id: "jp", label: "日文", color: "#ec4899", configs: [
+    { label: "日文", configs: [
       ["jp2t", "新字体 → 旧字体"], ["t2jp", "旧字体 → 新字体"],
     ]},
-    { id: "cngov", label: "国标", color: "#6366f1", configs: [
+    { label: "国标", configs: [
       ["s2t_cngov", "简 → 国标繁"], ["t2cngov", "繁体 → 国标繁"],
       ["t2cngov_keep_simp", "国标繁 (保留简体)"], ["t2cngov_jieba", "国标繁 (结巴)"],
       ["t2cngov_keep_simp_jieba","国标繁 (保留简体, 结巴)"],
@@ -62,9 +64,25 @@
   ];
 
   const CONFIG_VALUES = new Set();
-  const CONFIG_INDEX = new Map();
-  for (const g of CONFIG_GROUPS){
-    for (const [v] of g.configs) { CONFIG_VALUES.add(v); CONFIG_INDEX.set(v, g.id); }
+  for (const g of CONFIG_GROUPS) {
+    for (const [v] of g.configs) CONFIG_VALUES.add(v);
+  }
+
+  const TOFU_RISK_CONFIGS = new Set();
+  let tofuRiskMetaPromise = null;
+  const configJsonCache = new Map();
+  function fetchConfigJson(name) {
+    if (!configJsonCache.has(name)) {
+      configJsonCache.set(name, (async () => {
+        const resp = await fetch(`${OPENCC_CONFIG_BASE}${name}.json`);
+        if (!resp.ok) throw new Error(`Fetch ${name}.json failed: ${resp.status}`);
+        return resp.json();
+      })().catch((err) => {
+        configJsonCache.delete(name);
+        throw err;
+      }));
+    }
+    return configJsonCache.get(name);
   }
 
   const SKIP_SELECTOR = [
@@ -77,6 +95,7 @@
   const state = {
     config: DEFAULT_CONFIG, enabled: DEFAULT_ENABLED, collapsed: false,
     includeTofuRisk: DEFAULT_INCLUDE_TOFU_RISK,
+    tofuRiskMetaReady: false,
 
     queue: [], queuedNodes: new WeakSet(), processing: false, generation: 0,
     processingDone: Promise.resolve(), processingDone_resolve: null,
@@ -117,6 +136,7 @@
     if (!document.body) return;
     
     createPanel();
+    void ensureTofuRiskMetadata();
     if (state.enabled) { startObserving(); scheduleFullScan(0); }
   }
 
@@ -136,11 +156,75 @@
     try { localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value)); } catch {}
   }
 
+  function dictNodeHasTofuRisk(node) {
+    if (!node || typeof node !== "object") return false;
+    if (node.may_output_tofu === true) return true;
+    if (Array.isArray(node.dicts)) {
+      for (const child of node.dicts) {
+        if (dictNodeHasTofuRisk(child)) return true;
+      }
+    }
+    return false;
+  }
+
+  function configJsonHasTofuRisk(cfg) {
+    if (!cfg || typeof cfg !== "object") return false;
+    if (Array.isArray(cfg.normalization)) {
+      for (const step of cfg.normalization) {
+        if (dictNodeHasTofuRisk(step?.dict)) return true;
+      }
+    }
+    if (dictNodeHasTofuRisk(cfg.segmentation?.dict)) return true;
+    if (Array.isArray(cfg.conversion_chain)) {
+      for (const step of cfg.conversion_chain) {
+        if (dictNodeHasTofuRisk(step?.dict)) return true;
+      }
+    }
+    return false;
+  }
+
+  function configSupportsTofuRisk(configName) {
+    return state.tofuRiskMetaReady && TOFU_RISK_CONFIGS.has(configName);
+  }
+
+  async function ensureTofuRiskMetadata() {
+    if (state.tofuRiskMetaReady) return TOFU_RISK_CONFIGS;
+    if (!tofuRiskMetaPromise) {
+      tofuRiskMetaPromise = (async () => {
+        TOFU_RISK_CONFIGS.clear();
+        await Promise.all([...CONFIG_VALUES].map(async (name) => {
+          try {
+            const json = await fetchConfigJson(name);
+            if (configJsonHasTofuRisk(json)) TOFU_RISK_CONFIGS.add(name);
+          } catch {
+          }
+        }));
+        state.tofuRiskMetaReady = true;
+        notify();
+        return TOFU_RISK_CONFIGS;
+      })().catch((err) => {
+        tofuRiskMetaPromise = null;
+        state.tofuRiskMetaReady = false;
+        console.warn("[OpenCC-WASM] Failed to load tofu-risk config metadata:", err);
+        notify();
+        throw err;
+      });
+    }
+    return tofuRiskMetaPromise;
+  }
+
   function noteModuleLoadFailure() {
     openccModulePromise = null; openccModule = null;
     state.moduleLoadErrorCount++;
     if (state.moduleLoadErrorCount >= MAX_MODULE_LOAD_ERRORS) return { giveUp: true };
-    return { giveUp: false, delayMs: MODULE_LOAD_RETRY_BASE_MS * state.moduleLoadErrorCount };
+    return { giveUp: false, delayMs: MODULE_LOAD_RETRY_STEP_MS * state.moduleLoadErrorCount };
+  }
+
+  function withResolvers() {
+    if (typeof Promise.withResolvers === "function") return Promise.withResolvers();
+    let resolve, reject;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
   }
 
   async function getConverter(configName, includeTofuRiskDictionaries = true) {
@@ -280,6 +364,12 @@
         port2.postMessage(null);
       });
 
+  function promiseWithTimeout(promise, ms) {
+    let timer;
+    const timeout = new Promise(r => { timer = setTimeout(r, ms); });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
   function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
     if (!state.enabled || state.loadDisabled) return;
     if (state.fullScanTimer) { clearTimeout(state.fullScanTimer); state.fullScanTimer = 0; }
@@ -321,7 +411,7 @@
   function writeConverted(converted, gen) {
     for (const { item, result } of converted) {
       if (isStale(gen)) break;
-      if (nodeStates.get(item.node) !== item.state || item.state.version !== item.version) {
+      if (item.state.version !== item.version) {
         if (item.node.isConnected && shouldProcessTextNode(item.node)) enqueueNode(item.node);
         continue;
       }
@@ -373,7 +463,7 @@
     if (!state.queue.length) { setStatus(STATUS_ON_PREFIX + state.config); return; }
     
     state.processing = true;
-    const { promise, resolve } = Promise.withResolvers();
+    const { promise, resolve } = withResolvers();
     state.processingDone = promise; state.processingDone_resolve = resolve;
     const gen = currentGen();
     
@@ -497,17 +587,29 @@
   }
 
   async function restoreOriginals() {
-    clearScheduledTimers(); stopObserving(true);
+    clearScheduledTimers();
+    stopObserving(true);
     const myGen = state.generation;
+    const nodes = [];
+    walkTextNodes(document.body, n => nodeStates.has(n), n => nodes.push(n));
     let count = 0;
-    walkTextNodes(document.body, n => nodeStates.has(n), n => {
-      if (state.generation !== myGen) return;
+    for (const n of nodes) {
+      if (state.generation !== myGen) break;
       const ns = nodeStates.get(n);
       if (ns) {
-        if (n.isConnected && n.nodeValue !== ns.original) n.nodeValue = ns.original;
-        ns.convertedConfig = null; ns.convertedText = null; ns.version++;
+        try {
+          if (n.isConnected && n.nodeValue !== ns.original) n.nodeValue = ns.original;
+        } catch {
+          nodeStates.delete(n);
+          continue;
+        }
+        ns.convertedConfig = null;
+        ns.convertedText = null;
+        ns.convertedTofuRisk = null;
+        ns.version++;
       }
-    });
+      if (++count % RESTORE_YIELD_EVERY_N_NODES === 0) await yieldToMain();
+    }
     clearQueue();
   }
 
@@ -518,7 +620,7 @@
     try {
       if (!nextEnabled) {
         stopObserving(false);
-        if (state.processing) await Promise.race([state.processingDone, new Promise(r => setTimeout(r, 3000))]);
+        if (state.processing) await promiseWithTimeout(state.processingDone, 3000);
         state.enabled = false; storeSet("enabled", false);
         await restoreOriginals();
         setStatus("Off");
@@ -552,6 +654,7 @@
   }
 
   function setIncludeTofuRisk(next) {
+    if (!configSupportsTofuRisk(state.config)) { notify(); return; }
     next = Boolean(next);
     if (next === state.includeTofuRisk) { notify(); return; }
     state.includeTofuRisk = next;
@@ -614,13 +717,15 @@ button,select{font:inherit}
 .config-select:hover,.config-select:focus{border-color:rgba(158,145,255,.7);background-color:rgba(139,124,255,.1)}
 .config-select option,.config-select optgroup{background:#202033;color:#f7f6ff}
 .settings{display:grid;gap:10px;margin-top:14px}
-.setting{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 13px;border:1px solid var(--line);border-radius:13px;background:rgba(255,255,255,.035);cursor:pointer;user-select:none;transition:border-color .2s,background-color .2s}
-.setting:hover{border-color:rgba(158,145,255,.45);background:rgba(139,124,255,.08)}
+.setting{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 13px;border:1px solid var(--line);border-radius:13px;background:rgba(255,255,255,.035);cursor:pointer;user-select:none;transition:border-color .2s,background-color .2s,opacity .2s}
+.setting:hover:not(.locked){border-color:rgba(158,145,255,.45);background:rgba(139,124,255,.08)}
+.setting.locked{opacity:.48;cursor:not-allowed}
 .setting-copy{min-width:0}.setting-title{font-size:13px;color:var(--text)}.setting-help{margin-top:3px;font-size:11px;color:var(--dim);line-height:1.35}
 .switch{width:34px;height:20px;flex:0 0 auto;border:1px solid var(--line);border-radius:20px;background:rgba(255,255,255,.08);position:relative;transition:background .2s,border-color .2s}
 .switch::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:var(--muted);transition:transform .2s cubic-bezier(.2,.8,.2,1),background .2s}
 .setting.on .switch{border-color:rgba(139,124,255,.55);background:var(--accent-soft)}
 .setting.on .switch::after{transform:translateX(14px);background:#fff}
+.setting.locked .switch{border-color:var(--line);background:rgba(255,255,255,.05)}
 .btn{width:100%;height:42px;margin-top:16px;border:0;border-radius:12px;background:linear-gradient(135deg,#8273ff,#a78bfa);color:#fff;cursor:pointer;font-size:14px;font-weight:800;letter-spacing:.03em;box-shadow:0 8px 18px rgba(105,88,230,.25);transition:transform .15s,filter .2s,background .2s}
 .btn:hover{filter:brightness(1.08)}
 .btn:active{transform:scale(.98)}
@@ -642,8 +747,8 @@ button,select{font:inherit}
       <select class="config-select" aria-label="OpenCC conversion config"></select>
     </label>
     <div class="settings">
-      <div class="setting tofu-row" role="switch" tabindex="0" aria-checked="false" title="是否包含当前方案中可能产生罕见字（豆腐字）的词典条目；与「简→台繁+词汇」等方案名称中的“词汇”无关，若当前方案本身不含此类词典，切换不会有变化">
-        <div class="setting-copy"><div class="setting-title">罕见字词典</div><div class="setting-help">包含当前方案中可能产生罕见字的词典条目（部分方案可能无此类词典，切换无变化）</div></div>
+      <div class="setting tofu-row" role="switch" tabindex="0" aria-checked="false" aria-disabled="false">
+        <div class="setting-copy"><div class="setting-title">罕见字词典</div><div class="setting-help tofu-help"></div></div>
         <div class="switch"></div>
       </div>
     </div>
@@ -660,6 +765,7 @@ button,select{font:inherit}
       status: root.querySelector(".header-status"),
       configSelect: root.querySelector(".config-select"),
       tofuRow: root.querySelector(".tofu-row"),
+      tofuHelp: root.querySelector(".tofu-help"),
       toggle: root.querySelector(".btn"),
       fab: root.querySelector(".fab"),
       panel: root.querySelector(".panel"),
@@ -679,9 +785,17 @@ button,select{font:inherit}
     populateConfigOptions();
     state.ui.configSelect.addEventListener("change", e => setConfig(e.target.value));
 
-    state.ui.tofuRow.addEventListener("click", () => setIncludeTofuRisk(!state.includeTofuRisk));
+    state.ui.tofuRow.addEventListener("click", () => {
+      if (!state.tofuRiskMetaReady) { void ensureTofuRiskMetadata(); return; }
+      if (!configSupportsTofuRisk(state.config)) return;
+      setIncludeTofuRisk(!state.includeTofuRisk);
+    });
     state.ui.tofuRow.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setIncludeTofuRisk(!state.includeTofuRisk); }
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      if (!state.tofuRiskMetaReady) { void ensureTofuRiskMetadata(); return; }
+      if (!configSupportsTofuRisk(state.config)) return;
+      setIncludeTofuRisk(!state.includeTofuRisk);
     });
 
     state.ui.toggle.addEventListener("click", async () => {
@@ -713,7 +827,8 @@ button,select{font:inherit}
 
   function renderUI() {
     if (!state.ui) return;
-    const { ui, collapsed, enabled, config, status, includeTofuRisk } = state;
+    const { ui, collapsed, enabled, config, status, includeTofuRisk, tofuRiskMetaReady } = state;
+    const tofuAvailable = configSupportsTofuRisk(config);
 
     if (collapsed) {
       if (ui.panel.matches(":popover-open")) ui.panel.hidePopover();
@@ -722,9 +837,21 @@ button,select{font:inherit}
     }
 
     ui.configSelect.value = config;
-
-    ui.tofuRow.classList.toggle("on", includeTofuRisk);
-    ui.tofuRow.setAttribute("aria-checked", includeTofuRisk ? "true" : "false");
+    ui.tofuRow.classList.toggle("on", tofuAvailable && includeTofuRisk);
+    ui.tofuRow.classList.toggle("locked", !tofuAvailable);
+    ui.tofuRow.setAttribute("aria-checked", tofuAvailable && includeTofuRisk ? "true" : "false");
+    ui.tofuRow.setAttribute("aria-disabled", tofuAvailable ? "false" : "true");
+    ui.tofuRow.tabIndex = tofuAvailable ? 0 : -1;
+    if (!tofuRiskMetaReady) {
+      ui.tofuHelp.textContent = "正在检测当前方案是否含罕见字词典…";
+      ui.tofuRow.title = "正在读取转换方案元数据";
+    } else if (tofuAvailable) {
+      ui.tofuHelp.textContent = "包含当前方案中可能产生罕见字（豆腐字）的词典条目";
+      ui.tofuRow.title = "是否包含当前方案中可能产生罕见字的词典条目；与方案名中的“词汇”无关";
+    } else {
+      ui.tofuHelp.textContent = "当前转换方案不含罕见字词典，开关已锁定";
+      ui.tofuRow.title = "当前转换方案不含罕见字词典";
+    }
 
     ui.toggle.textContent = enabled ? "关闭网页转换" : "开启网页转换";
     ui.toggle.classList.toggle("off", !enabled);
