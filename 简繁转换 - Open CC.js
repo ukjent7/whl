@@ -608,8 +608,7 @@ button,select{font:inherit}
 .header-status.error{color:var(--danger)}
 .body{padding:18px}
 .eyebrow{font-size:11px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
-.config-summary{margin-top:7px;font-size:24px;font-weight:800;letter-spacing:-.03em;color:var(--text);line-height:1.15}
-.config-field{display:block;margin-top:18px}
+.config-field{display:block}
 .config-field .eyebrow{display:block;margin-bottom:7px}
 .config-select{width:100%;height:42px;padding:0 38px 0 13px;border:1px solid var(--line);border-radius:12px;outline:none;background:var(--surface-2);color:var(--text);cursor:pointer;appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 17px) 18px,calc(100% - 12px) 18px;background-size:5px 5px,5px 5px;background-repeat:no-repeat;transition:border-color .2s,background-color .2s}
 .config-select:hover,.config-select:focus{border-color:rgba(158,145,255,.7);background-color:rgba(139,124,255,.1)}
@@ -638,10 +637,8 @@ button,select{font:inherit}
     <div class="header-status"></div>
   </div>
   <div class="body">
-    <div class="eyebrow">当前转换方案</div>
-    <div class="config-summary"></div>
     <label class="config-field">
-      <span class="eyebrow">选择方案</span>
+      <span class="eyebrow">转换方案</span>
       <select class="config-select" aria-label="OpenCC conversion config"></select>
     </label>
     <div class="settings">
@@ -662,7 +659,6 @@ button,select{font:inherit}
       host, root,
       status: root.querySelector(".header-status"),
       configSelect: root.querySelector(".config-select"),
-      configSummary: root.querySelector(".config-summary"),
       tofuRow: root.querySelector(".tofu-row"),
       toggle: root.querySelector(".btn"),
       fab: root.querySelector(".fab"),
@@ -726,8 +722,6 @@ button,select{font:inherit}
     }
 
     ui.configSelect.value = config;
-    const selected = CONFIG_GROUPS.flatMap(group => group.configs).find(([value]) => value === config);
-    ui.configSummary.textContent = selected ? selected[1] : config;
 
     ui.tofuRow.classList.toggle("on", includeTofuRisk);
     ui.tofuRow.setAttribute("aria-checked", includeTofuRisk ? "true" : "false");
