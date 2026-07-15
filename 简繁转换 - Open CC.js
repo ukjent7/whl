@@ -63,26 +63,26 @@
     ]},
   ];
 
-  const CONFIG_VALUES = new Set();
-  for (const g of CONFIG_GROUPS) {
-    for (const [v] of g.configs) CONFIG_VALUES.add(v);
-  }
+  const CONFIG_VALUES = new Set(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => v)));
 
   const TOFU_RISK_CONFIGS = new Set();
   let tofuRiskMetaPromise = null;
   const configJsonCache = new Map();
   function fetchConfigJson(name) {
-    if (!configJsonCache.has(name)) {
-      configJsonCache.set(name, (async () => {
-        const resp = await fetch(`${OPENCC_CONFIG_BASE}${name}.json`);
-        if (!resp.ok) throw new Error(`Fetch ${name}.json failed: ${resp.status}`);
-        return resp.json();
-      })().catch((err) => {
-        configJsonCache.delete(name);
-        throw err;
-      }));
+    let p = configJsonCache.get(name);
+    if (!p) {
+      p = fetch(`${OPENCC_CONFIG_BASE}${name}.json`)
+        .then(resp => {
+          if (!resp.ok) throw new Error(`Fetch ${name}.json failed: ${resp.status}`);
+          return resp.json();
+        })
+        .catch(err => {
+          configJsonCache.delete(name);
+          throw err;
+        });
+      configJsonCache.set(name, p);
     }
-    return configJsonCache.get(name);
+    return p;
   }
 
   const SKIP_SELECTOR = [
@@ -159,28 +159,17 @@
   function dictNodeHasTofuRisk(node) {
     if (!node || typeof node !== "object") return false;
     if (node.may_output_tofu === true) return true;
-    if (Array.isArray(node.dicts)) {
-      for (const child of node.dicts) {
-        if (dictNodeHasTofuRisk(child)) return true;
-      }
-    }
-    return false;
+    return Array.isArray(node.dicts) && node.dicts.some(dictNodeHasTofuRisk);
   }
 
   function configJsonHasTofuRisk(cfg) {
     if (!cfg || typeof cfg !== "object") return false;
-    if (Array.isArray(cfg.normalization)) {
-      for (const step of cfg.normalization) {
-        if (dictNodeHasTofuRisk(step?.dict)) return true;
-      }
-    }
-    if (dictNodeHasTofuRisk(cfg.segmentation?.dict)) return true;
-    if (Array.isArray(cfg.conversion_chain)) {
-      for (const step of cfg.conversion_chain) {
-        if (dictNodeHasTofuRisk(step?.dict)) return true;
-      }
-    }
-    return false;
+    return (
+      cfg.normalization?.some(s => dictNodeHasTofuRisk(s?.dict)) ||
+      dictNodeHasTofuRisk(cfg.segmentation?.dict) ||
+      cfg.conversion_chain?.some(s => dictNodeHasTofuRisk(s?.dict)) ||
+      false
+    );
   }
 
   function configSupportsTofuRisk(configName) {
@@ -220,13 +209,6 @@
     return { giveUp: false, delayMs: MODULE_LOAD_RETRY_STEP_MS * state.moduleLoadErrorCount };
   }
 
-  function withResolvers() {
-    if (typeof Promise.withResolvers === "function") return Promise.withResolvers();
-    let resolve, reject;
-    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
-    return { promise, resolve, reject };
-  }
-
   async function getConverter(configName, includeTofuRiskDictionaries = true) {
     if (!openccModulePromise) {
       openccModulePromise = import(OPENCC_ESM_URL).then(mod => {
@@ -242,25 +224,22 @@
     }
     await openccModulePromise;
     const cacheKey = `${configName}::tofu=${includeTofuRiskDictionaries}`;
-    if (converterCache.has(cacheKey)) return converterCache.get(cacheKey);
-    
-    const buildPromise = (async () => {
-      const converter = openccModule.Converter({ config: configName, includeTofuRiskDictionaries });
-      await converter(WARMUP_TEXT);
-      return converter;
-    })();
-    
-    converterCache.set(cacheKey, buildPromise);
-    try {
-      const converter = await buildPromise;
-      converterCache.set(cacheKey, Promise.resolve(converter));
-      return converter;
-    } catch (err) {
-      converterCache.delete(cacheKey);
-      const e = new Error(`Build converter failed '${configName}': ${err?.message ?? err}`);
-      e.kind = "converter_init"; e.config = configName;
-      throw e;
+    let p = converterCache.get(cacheKey);
+    if (!p) {
+      p = (async () => {
+        const converter = openccModule.Converter({ config: configName, includeTofuRiskDictionaries });
+        await converter(WARMUP_TEXT);
+        return converter;
+      })().catch(err => {
+        converterCache.delete(cacheKey);
+        const e = new Error(`Build converter failed '${configName}': ${err?.message ?? err}`);
+        e.kind = "converter_init";
+        e.config = configName;
+        throw e;
+      });
+      converterCache.set(cacheKey, p);
     }
+    return p;
   }
 
   function shouldSkipElement(el) {
@@ -356,13 +335,7 @@
 
   function clearQueue() { state.queue.length = 0; state.queuedNodes = new WeakSet(); }
 
-  const yieldToMain = typeof scheduler?.yield === "function"
-    ? () => scheduler.yield()
-    : () => new Promise(r => {
-        const { port1, port2 } = new MessageChannel();
-        port1.onmessage = () => { port1.close(); port2.close(); r(); };
-        port2.postMessage(null);
-      });
+  const yieldToMain = () => scheduler.yield();
 
   function promiseWithTimeout(promise, ms) {
     let timer;
@@ -390,8 +363,7 @@
     state.processTimer = setTimeout(() => {
       state.processTimer = 0;
       state.loadDisabled = false;
-      if (typeof scheduler?.postTask === "function") scheduler.postTask(() => processQueue(), { priority: "background" });
-      else void processQueue();
+      scheduler.postTask(() => processQueue(), { priority: "background" });
     }, delay);
   }
 
@@ -400,8 +372,7 @@
     if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
     state.processTimer = setTimeout(() => {
       state.processTimer = 0;
-      if (typeof scheduler?.postTask === "function") scheduler.postTask(() => processQueue(), { priority: "background" });
-      else void processQueue();
+      scheduler.postTask(() => processQueue(), { priority: "background" });
     }, delay);
   }
 
@@ -463,7 +434,7 @@
     if (!state.queue.length) { setStatus(STATUS_ON_PREFIX + state.config); return; }
     
     state.processing = true;
-    const { promise, resolve } = withResolvers();
+    const { promise, resolve } = Promise.withResolvers();
     state.processingDone = promise; state.processingDone_resolve = resolve;
     const gen = currentGen();
     
@@ -810,19 +781,14 @@ button,select{font:inherit}
   }
 
   function populateConfigOptions() {
-    const select = state.ui.configSelect;
-    select.innerHTML = "";
-    for (const group of CONFIG_GROUPS) {
-      const optgroup = document.createElement("optgroup");
-      optgroup.label = group.label;
-      for (const [value, label] of group.configs) {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = label;
-        optgroup.appendChild(option);
-      }
-      select.appendChild(optgroup);
-    }
+    state.ui.configSelect.replaceChildren(
+      ...CONFIG_GROUPS.map(({ label, configs }) => {
+        const og = document.createElement("optgroup");
+        og.label = label;
+        og.append(...configs.map(([value, text]) => new Option(text, value)));
+        return og;
+      }),
+    );
   }
 
   function renderUI() {
