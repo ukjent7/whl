@@ -345,6 +345,7 @@
 
   function scheduleFullScan(delay = FULL_SCAN_DEBOUNCE_MS) {
     if (!state.enabled || state.loadDisabled) return;
+    if (state.brokenConfigs.has(state.config)) return;
     if (state.fullScanTimer) { clearTimeout(state.fullScanTimer); state.fullScanTimer = 0; }
     state.fullScanTimer = setTimeout(() => {
       state.fullScanTimer = 0;
@@ -612,6 +613,7 @@
     if (nextConfig === state.config) { notify(); return; }
     state.config = nextConfig; storeSet("config", state.config);
     state.generation++; clearQueue();
+    state.brokenConfigs.delete(nextConfig);
     if (state.enabled) {
       setStatus(`Switching to ${state.config}…`, true);
       if (state.brokenConfigs.has(state.config)) {
