@@ -65,8 +65,9 @@
 
   const CONFIG_VALUES = new Set(CONFIG_GROUPS.flatMap(g => g.configs.map(([v]) => v)));
 
-  const TOFU_RISK_CONFIGS = new Set();
-  let tofuRiskMetaPromise = null;
+  const tofuRiskMeta = new Map();         // configName -> boolean: has tofu-risk dicts
+  const tofuRiskMetaPromises = new Map(); // configName -> in-flight metadata fetch
+  const tofuRiskMetaFailed = new Set();   // configName -> last fetch failed (click tofu row to retry)
   const configJsonCache = new Map();
   function fetchConfigJson(name) {
     let p = configJsonCache.get(name);
@@ -95,7 +96,6 @@
   const state = {
     config: DEFAULT_CONFIG, enabled: DEFAULT_ENABLED, collapsed: false,
     includeTofuRisk: DEFAULT_INCLUDE_TOFU_RISK,
-    tofuRiskMetaReady: false,
 
     queue: [], queuedNodes: new WeakSet(), processing: false, generation: 0,
     processingDone: Promise.resolve(), processingDone_resolve: null,
@@ -136,7 +136,7 @@
     if (!document.body) return;
     
     createPanel();
-    void ensureTofuRiskMetadata();
+    void ensureTofuRiskMetadata(state.config);
     if (state.enabled) { startObserving(); scheduleFullScan(0); }
   }
 
@@ -173,33 +173,38 @@
   }
 
   function configSupportsTofuRisk(configName) {
-    return state.tofuRiskMetaReady && TOFU_RISK_CONFIGS.has(configName);
+    return tofuRiskMeta.get(configName) === true;
   }
 
-  async function ensureTofuRiskMetadata() {
-    if (state.tofuRiskMetaReady) return TOFU_RISK_CONFIGS;
-    if (!tofuRiskMetaPromise) {
-      tofuRiskMetaPromise = (async () => {
-        TOFU_RISK_CONFIGS.clear();
-        await Promise.all([...CONFIG_VALUES].map(async (name) => {
-          try {
-            const json = await fetchConfigJson(name);
-            if (configJsonHasTofuRisk(json)) TOFU_RISK_CONFIGS.add(name);
-          } catch {
-          }
-        }));
-        state.tofuRiskMetaReady = true;
-        notify();
-        return TOFU_RISK_CONFIGS;
-      })().catch((err) => {
-        tofuRiskMetaPromise = null;
-        state.tofuRiskMetaReady = false;
-        console.warn("[OpenCC-WASM] Failed to load tofu-risk config metadata:", err);
-        notify();
-        throw err;
-      });
+  function tofuMetaState(configName) {
+    if (tofuRiskMeta.has(configName)) return "ready";
+    if (tofuRiskMetaPromises.has(configName)) return "loading";
+    return tofuRiskMetaFailed.has(configName) ? "error" : "idle";
+  }
+
+  // Lazy, per-config metadata: only the selected config is ever queried, so only
+  // its JSON is fetched (instead of all 26 up front). Failures are tracked per
+  // config so the tofu row can offer a real retry.
+  function ensureTofuRiskMetadata(configName = state.config) {
+    if (tofuRiskMeta.has(configName)) return Promise.resolve(tofuRiskMeta.get(configName));
+    let p = tofuRiskMetaPromises.get(configName);
+    if (!p) {
+      p = fetchConfigJson(configName)
+        .then(json => {
+          tofuRiskMeta.set(configName, configJsonHasTofuRisk(json));
+          tofuRiskMetaFailed.delete(configName);
+        })
+        .catch(err => {
+          tofuRiskMetaFailed.add(configName);
+          console.warn(`[OpenCC-WASM] Failed to load tofu-risk metadata for '${configName}':`, err);
+        })
+        .finally(() => {
+          tofuRiskMetaPromises.delete(configName);
+          notify();
+        });
+      tofuRiskMetaPromises.set(configName, p);
     }
-    return tofuRiskMetaPromise;
+    return p;
   }
 
   function noteModuleLoadFailure() {
@@ -613,6 +618,7 @@
     if (nextConfig === state.config) { notify(); return; }
     state.config = nextConfig; storeSet("config", state.config);
     state.generation++; clearQueue();
+    void ensureTofuRiskMetadata(state.config);
     state.brokenConfigs.delete(nextConfig);
     if (state.enabled) {
       setStatus(`Switching to ${state.config}…`, true);
@@ -758,17 +764,16 @@ button,select{font:inherit}
     populateConfigOptions();
     state.ui.configSelect.addEventListener("change", e => setConfig(e.target.value));
 
-    state.ui.tofuRow.addEventListener("click", () => {
-      if (!state.tofuRiskMetaReady) { void ensureTofuRiskMetadata(); return; }
+    const onTofuRowActivate = () => {
+      if (tofuMetaState(state.config) !== "ready") { void ensureTofuRiskMetadata(state.config); return; }
       if (!configSupportsTofuRisk(state.config)) return;
       setIncludeTofuRisk(!state.includeTofuRisk);
-    });
+    };
+    state.ui.tofuRow.addEventListener("click", onTofuRowActivate);
     state.ui.tofuRow.addEventListener("keydown", (e) => {
       if (e.key !== "Enter" && e.key !== " ") return;
       e.preventDefault();
-      if (!state.tofuRiskMetaReady) { void ensureTofuRiskMetadata(); return; }
-      if (!configSupportsTofuRisk(state.config)) return;
-      setIncludeTofuRisk(!state.includeTofuRisk);
+      onTofuRowActivate();
     });
 
     state.ui.toggle.addEventListener("click", async () => {
@@ -795,8 +800,9 @@ button,select{font:inherit}
 
   function renderUI() {
     if (!state.ui) return;
-    const { ui, collapsed, enabled, config, status, includeTofuRisk, tofuRiskMetaReady } = state;
-    const tofuAvailable = configSupportsTofuRisk(config);
+    const { ui, collapsed, enabled, config, status, includeTofuRisk } = state;
+    const tofuMeta = tofuMetaState(config);
+    const tofuAvailable = tofuMeta === "ready" && configSupportsTofuRisk(config);
 
     if (collapsed) {
       if (ui.panel.matches(":popover-open")) ui.panel.hidePopover();
@@ -805,14 +811,18 @@ button,select{font:inherit}
     }
 
     ui.configSelect.value = config;
+    const tofuLocked = tofuMeta === "ready" && !tofuAvailable;
     ui.tofuRow.classList.toggle("on", tofuAvailable && includeTofuRisk);
-    ui.tofuRow.classList.toggle("locked", !tofuAvailable);
+    ui.tofuRow.classList.toggle("locked", tofuLocked);
     ui.tofuRow.setAttribute("aria-checked", tofuAvailable && includeTofuRisk ? "true" : "false");
-    ui.tofuRow.setAttribute("aria-disabled", tofuAvailable ? "false" : "true");
-    ui.tofuRow.tabIndex = tofuAvailable ? 0 : -1;
-    if (!tofuRiskMetaReady) {
+    ui.tofuRow.setAttribute("aria-disabled", tofuLocked ? "true" : "false");
+    ui.tofuRow.tabIndex = tofuLocked ? -1 : 0;
+    if (tofuMeta === "idle" || tofuMeta === "loading") {
       ui.tofuHelp.textContent = "正在检测当前方案是否含罕见字词典…";
       ui.tofuRow.title = "正在读取转换方案元数据";
+    } else if (tofuMeta === "error") {
+      ui.tofuHelp.textContent = "读取方案元数据失败，点击重试";
+      ui.tofuRow.title = "读取转换方案元数据失败，点击重试";
     } else if (tofuAvailable) {
       ui.tofuHelp.textContent = "包含当前方案中可能产生罕见字（豆腐字）的词典条目";
       ui.tofuRow.title = "是否包含当前方案中可能产生罕见字的词典条目；与方案名中的“词汇”无关";
