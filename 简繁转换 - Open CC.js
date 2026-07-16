@@ -840,6 +840,7 @@ button,select{font:inherit}
     let cachedW = state.ui.host.offsetWidth || 52;
     let cachedH = state.ui.host.offsetHeight || 52;
     let startX = 0, startY = 0, startLeft = 0, startTop = 0, moved = false;
+    let wasOpen = false;
 
     requestAnimationFrame(() => {
       cachedW = state.ui.host.offsetWidth || cachedW;
@@ -866,6 +867,7 @@ button,select{font:inherit}
     function startPointerDrag(e) {
       if (e.button !== 0) return;
       moved = false; startX = e.clientX; startY = e.clientY;
+      wasOpen = ui.panel.matches(":popover-open");
       const rect = state.ui.host.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
       applyPosition(startLeft, startTop);
@@ -891,7 +893,7 @@ button,select{font:inherit}
         const rect = state.ui.host.getBoundingClientRect();
         storeSet("panelPos", { left: rect.left, top: rect.top });
       } else {
-        state.collapsed = !state.collapsed;
+        state.collapsed = wasOpen;
         storeSet("collapsed", state.collapsed);
         notify();
       }
