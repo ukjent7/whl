@@ -29,6 +29,7 @@
   const MIN_FULL_SCAN_DELAY_MS = 16;
   const MAX_CONVERTER_ERRORS = 5;
   const CONVERTER_ERROR_COOLDOWN_MS = 200;
+  const CONVERTER_FATAL_COOLDOWN_MS = 5000;
   const MAX_NODE_CONVERT_ERRORS = 2;
   const MAX_MODULE_LOAD_ERRORS = 3;
   const MODULE_LOAD_RETRY_STEP_MS = 2000;
@@ -104,7 +105,7 @@
 
     toggling: false, pendingConfig: null,
 
-    converterErrorCount: 0, moduleLoadErrorCount: 0, loadDisabled: false,
+    converterErrorCount: 0, converterCooldownUntil: 0, moduleLoadErrorCount: 0, loadDisabled: false,
     _retryDelay: null, brokenConfigs: new Set(),
 
     status: { text: "", busy: false, error: false }, ui: null,
@@ -376,10 +377,11 @@
   function scheduleProcess(delay = PROCESS_DEBOUNCE_MS) {
     if (!state.enabled || state.loadDisabled) return;
     if (state.processTimer) { clearTimeout(state.processTimer); state.processTimer = 0; }
+    const wait = Math.max(delay, state.converterCooldownUntil - Date.now());
     state.processTimer = setTimeout(() => {
       state.processTimer = 0;
       scheduler.postTask(() => processQueue(), { priority: "background" });
-    }, delay);
+    }, wait);
   }
 
   const currentGen = () => ({ generation: state.generation, config: state.config, includeTofuRisk: state.includeTofuRisk });
@@ -417,10 +419,15 @@
         item.state.errorCount = (item.state.errorCount || 0) + 1;
         state.converterErrorCount++;
         if (state.converterErrorCount >= MAX_CONVERTER_ERRORS) {
-          if (item.state.errorCount < MAX_NODE_CONVERT_ERRORS) enqueueNode(item.node);
-          if (converted.length) { stopObserving(false); writeConverted(converted, gen); if (!isStale(gen)) startObserving(); }
+          clearQueue();
+          state.converterErrorCount = 0;
+          state.converterCooldownUntil = Date.now() + CONVERTER_FATAL_COOLDOWN_MS;
+          if (converted.length && !isStale(gen)) {
+            stopObserving(true);
+            writeConverted(converted, gen);
+            if (!isStale(gen)) startObserving();
+          }
           setStatus("Conversion failed", false, true);
-          clearQueue(); state.converterErrorCount = 0;
           converterCache.delete(`${gen.config}::tofu=${gen.includeTofuRisk}`);
           return { fatal: true };
         }
@@ -603,6 +610,7 @@
         setStatus("Off");
       } else {
         state.enabled = true; storeSet("enabled", true); state.loadDisabled = false;
+        state.converterCooldownUntil = 0;
         setStatus(STATUS_ON_PREFIX + state.config, true);
         startObserving(); scheduleFullScan(0);
       }
@@ -618,6 +626,7 @@
     if (nextConfig === state.config) { notify(); return; }
     state.config = nextConfig; storeSet("config", state.config);
     state.generation++; clearQueue();
+    state.converterCooldownUntil = 0;
     void ensureTofuRiskMetadata(state.config);
     state.brokenConfigs.delete(nextConfig);
     if (state.enabled) {
