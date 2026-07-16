@@ -886,7 +886,7 @@ button,select{font:inherit}
     function startPointerDrag(e) {
       if (e.button !== 0) return;
       moved = false; startX = e.clientX; startY = e.clientY;
-      wasOpen = ui.panel.matches(":popover-open");
+      wasOpen = state.ui.panel.matches(":popover-open");
       const rect = state.ui.host.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
       applyPosition(startLeft, startTop);
