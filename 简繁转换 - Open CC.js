@@ -672,7 +672,7 @@ button,select{font:inherit}
 .fab-dot.on,.header-dot.on{background:var(--success);animation:pulse 3s ease-in-out infinite}
 .fab-dot.busy,.header-dot.busy{background:var(--warning);animation:blink 1s ease-in-out infinite}
 .fab-dot.error,.header-dot.error{background:var(--danger);animation:blink 1s ease-in-out infinite}
-.panel{width:350px;border:1px solid var(--line);border-radius:22px;background:var(--surface);backdrop-filter:blur(28px);box-shadow:0 26px 70px rgba(0,0,0,.58),0 0 0 1px var(--accent-soft),inset 0 1px rgba(255,255,255,.1);overflow:hidden;position-anchor:--opencc-anchor;position-area:block-end span-inline-end;margin:8px;opacity:0;transform:translateY(12px) scale(.97);transition:opacity .25s ease,transform .3s cubic-bezier(.2,.8,.2,1),overlay .25s allow-discrete,display .25s allow-discrete}
+.panel{width:350px;border:1px solid var(--line);border-radius:22px;background:var(--surface);backdrop-filter:blur(28px);box-shadow:0 26px 70px rgba(0,0,0,.58),0 0 0 1px var(--accent-soft),inset 0 1px rgba(255,255,255,.1);overflow:hidden;position-anchor:--opencc-anchor;position-area: block-start span-inline-start;position-try-fallbacks: flip-block;margin:8px;opacity:0;transform:translateY(12px) scale(.97);transition:opacity .25s ease,transform .3s cubic-bezier(.2,.8,.2,1),overlay .25s allow-discrete,display .25s allow-discrete}
 .panel:popover-open{opacity:1;transform:none}
 @starting-style{.panel:popover-open{opacity:0;transform:translateY(20px) scale(.94)}}
 .panel::backdrop{background:transparent}
