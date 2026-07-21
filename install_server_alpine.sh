@@ -425,7 +425,6 @@ command_args="server --config ${CONFIG_DIR}/config.yaml"
 command_user="root:root"
 
 supervise_daemon_args="--env HYSTERIA_LOG_LEVEL=info"
-export HYSTERIA_LOG_LEVEL=info
 
 respawn_delay=1
 respawn_max=10
@@ -707,20 +706,14 @@ perform_install() {
     exit 95
   fi
 
-  _exit_trap_armed=
-
   arm_exit_trap() {
-    _exit_trap_armed=1
     trap '
-      if [[ -n "$_exit_trap_armed" ]]; then
-        warning "安装步骤在停止 hysteria-server 后失败，正在尝试以原有二进制文件重启服务。"
-        start_stopped_service || true
-      fi
+      warning "安装步骤在停止 hysteria-server 后失败，正在尝试以原有二进制文件重启服务。"
+      start_stopped_service || true
     ' EXIT
   }
 
   disarm_exit_trap() {
-    _exit_trap_armed=
     trap - EXIT
   }
 
