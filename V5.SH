@@ -449,6 +449,27 @@ check_hysteria_user() {
     return
   fi
 
+  # File capabilities (setcap) are how we let an unprivileged user bind :443.
+  # In containers and some restricted sandboxes they either cannot be set, or
+  # setcap appears to succeed but exec of the binary fails with
+  # "Operation not permitted". Prefer running as root in those environments
+  # (container/sandbox isolation is the security boundary).
+  if is_in_container; then
+    HYSTERIA_USER="root"
+    note "Container environment detected; service will run as root (file capabilities are not reliable in containers)."
+    return
+  fi
+
+  # Probe only when setcap already exists; if missing we still default to the
+  # unprivileged user and let set_hysteria_capabilities try to install libcap
+  # later (or warn). A hard root fallback here would force root on every
+  # minimal Alpine before libcap is installed.
+  if has_command setcap && ! file_capabilities_usable; then
+    HYSTERIA_USER="root"
+    note "File capabilities are not usable on this system (setcap/exec probe failed); service will run as root so privileged ports still work."
+    return
+  fi
+
   if [[ ! -e "$OPENRC_INIT_PATH" ]]; then
     HYSTERIA_USER="$_default_hysteria_user"
     return
@@ -468,7 +489,9 @@ check_hysteria_homedir() {
     return
   fi
 
-  if ! is_user_exists "$HYSTERIA_USER"; then
+  # For root (container mode) or non-existent users, use the explicit default
+  # path rather than resolving ~ (which for root would be /root).
+  if [[ "$HYSTERIA_USER" == "root" ]] || ! is_user_exists "$HYSTERIA_USER"; then
     HYSTERIA_HOME_DIR="$_default_hysteria_homedir"
     return
   fi
@@ -588,6 +611,13 @@ parse_arguments() {
 ###
 
 # /etc/init.d/hysteria-server  (OpenRC)
+#
+# IMPORTANT: This uses an unquoted heredoc (<<EOF) so $EXECUTABLE_INSTALL_PATH
+# etc. expand at install time. That means backticks and $(...) inside the
+# template body are command-substituted by *this* bash, not written literally.
+# Never put shell examples like `export` in comments here -- bash will run them
+# and dump `declare -x ...` lines into the generated OpenRC script (which then
+# fails under /bin/sh with "declare: not found").
 tpl_hysteria_server_openrc() {
   cat << EOF
 #!/sbin/openrc-run
@@ -599,11 +629,9 @@ command="$EXECUTABLE_INSTALL_PATH"
 command_args="server --config ${CONFIG_DIR}/config.yaml"
 command_user="$HYSTERIA_USER:$HYSTERIA_USER"
 
-# Mirrors the upstream systemd unit's Environment=HYSTERIA_LOG_LEVEL=info.
-# We use start-stop-daemon's --env here (rather than a plain `export` in
-# this openrc-run script) so the variable is explicitly injected into the
-# spawned process's environment, instead of relying on it being implicitly
-# inherited through however this script happens to be sourced/executed.
+# Mirrors the upstream systemd unit Environment=HYSTERIA_LOG_LEVEL=info.
+# Inject via start-stop-daemon --env so the child process always gets it
+# (plain export in this file would only affect the openrc-run shell).
 start_stop_daemon_args="--env HYSTERIA_LOG_LEVEL=info"
 
 command_background="yes"
@@ -684,6 +712,79 @@ start_stopped_service() {
   echo -ne "Starting hysteria-server ... "
   rc-service hysteria-server start
   echo "done"
+}
+
+
+###
+# CONTAINER / CAPABILITY DETECTION
+###
+
+# Detect whether we are running inside a container (Docker, Podman, LXC, etc.)
+# where file capabilities are often not honored and cause "Operation not permitted".
+is_in_container() {
+  [[ -f /run/.containerenv ]] && return 0
+  [[ -f /.dockerenv ]] && return 0
+  [[ -f /run/.dockerenv ]] && return 0
+  # systemd-nspawn / some orchestrators
+  [[ -f /run/host/container-manager ]] && return 0
+  # OpenVZ / Virtuozzo legacy
+  [[ -d /proc/vz && ! -d /proc/bc ]] && return 0
+  # cgroup v1/v2 path heuristics (best-effort; not exhaustive)
+  if [[ -r /proc/1/cgroup ]]; then
+    grep -qsE '(/docker|/lxc|/kubepods|/podman|/containerd|/libpod|/garden|/crio)' /proc/1/cgroup 2>/dev/null && return 0
+  fi
+  # env markers (null-delimited in /proc; tr to newlines for grep)
+  if [[ -r /proc/1/environ ]]; then
+    tr '\0' '\n' < /proc/1/environ 2>/dev/null | grep -qsE '^(container=|container_uuid=)' && return 0
+  fi
+  if [[ -r /proc/self/mountinfo ]]; then
+    grep -qsE '(/docker|/lxc|/podman|/containers/storage|/libpod)' /proc/self/mountinfo 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+# Probe whether file capabilities can be applied AND the resulting binary still
+# executes. On many containers/VPS sandboxes, setcap succeeds but exec fails
+# with "Operation not permitted" (exactly the failure mode seen with hysteria).
+#
+# Returns 0 if usable, 1 otherwise. Does not require the hysteria binary.
+file_capabilities_usable() {
+  if ! has_command setcap; then
+    return 1
+  fi
+
+  local _probe _true
+  if [[ -x /bin/true ]]; then
+    _true=/bin/true
+  elif [[ -x /usr/bin/true ]]; then
+    _true=/usr/bin/true
+  else
+    return 1
+  fi
+
+  _probe="$(mktemp)"
+  # Copy a known-good tiny binary; setcap on the live hysteria path is tested
+  # separately after install.
+  if ! cp "$_true" "$_probe" 2>/dev/null; then
+    rm -f "$_probe"
+    return 1
+  fi
+  chmod 755 "$_probe" 2>/dev/null || true
+
+  if ! setcap 'cap_net_bind_service=ep' "$_probe" 2>/dev/null; then
+    rm -f "$_probe"
+    return 1
+  fi
+
+  if "$_probe" > /dev/null 2>&1; then
+    setcap -r "$_probe" 2>/dev/null || true
+    rm -f "$_probe"
+    return 0
+  fi
+
+  setcap -r "$_probe" 2>/dev/null || true
+  rm -f "$_probe"
+  return 1
 }
 
 
@@ -782,11 +883,30 @@ check_update() {
 # ENTRY
 ###
 
+clear_hysteria_capabilities() {
+  # Leaving file caps on a binary that cannot exec bricks the install
+  # (seen as: -sh: .../hysteria: Operation not permitted).
+  if has_command setcap; then
+    setcap -r "$EXECUTABLE_INSTALL_PATH" 2>/dev/null || true
+  fi
+}
+
 set_hysteria_capabilities() {
   # Hysteria runs as an unprivileged user (see HYSTERIA_USER), so it needs
   # explicit capabilities to bind low ports (e.g. :443) and use raw/admin
   # network features, mirroring what the upstream systemd unit grants via
   # CapabilityBoundingSet / AmbientCapabilities.
+  #
+  # In containers / some sandboxes, file capabilities cause
+  # "Operation not permitted" on exec. The service then runs as root (see
+  # check_hysteria_user), so caps are unnecessary and must be stripped.
+
+  if [[ "$HYSTERIA_USER" == "root" ]] || is_in_container; then
+    note "Skipping file capabilities (user=$HYSTERIA_USER; container/sandbox-safe install)."
+    clear_hysteria_capabilities
+    return
+  fi
+
   if ! has_command setcap; then
     if has_command apk; then
       echo -ne "Installing 'setcap' (libcap) via apk ... "
@@ -800,16 +920,36 @@ set_hysteria_capabilities() {
 
   if ! has_command setcap; then
     warning "'setcap' is not available; hysteria will NOT be able to bind privileged ports (e.g. :443) as user '$HYSTERIA_USER'."
-    note "Install the 'libcap' package (apk add libcap) and re-run, or run hysteria as root, or use a port >1024."
+    note "Install the 'libcap' package (apk add libcap) and re-run, or set HYSTERIA_USER=root, or use a port >1024."
+    return
+  fi
+
+  if ! file_capabilities_usable; then
+    warning "File capabilities are not usable on this system; not applying setcap (avoids bricking the binary with Operation not permitted on exec)."
+    note "Service user is '$HYSTERIA_USER'. For privileged ports, re-run with HYSTERIA_USER=root or use a port >1024."
+    clear_hysteria_capabilities
     return
   fi
 
   echo -ne "Granting network capabilities to $EXECUTABLE_INSTALL_PATH ... "
-  if setcap 'cap_net_bind_service,cap_net_admin,cap_net_raw+ep' "$EXECUTABLE_INSTALL_PATH"; then
-    echo "ok"
-  else
+  if ! setcap 'cap_net_bind_service,cap_net_admin,cap_net_raw+ep' "$EXECUTABLE_INSTALL_PATH"; then
+    echo "failed"
     warning "Failed to set capabilities on $EXECUTABLE_INSTALL_PATH; binding to privileged ports as user '$HYSTERIA_USER' will likely fail."
+    return
   fi
+
+  # Defense in depth: even if the probe passed, verify *this* binary still runs.
+  # If exec fails, strip caps immediately so the install is not left unusable.
+  if ! "$EXECUTABLE_INSTALL_PATH" version > /dev/null 2>&1 && \
+     ! "$EXECUTABLE_INSTALL_PATH" -v > /dev/null 2>&1; then
+    echo "failed (binary not executable with capabilities)"
+    warning "setcap succeeded but '$EXECUTABLE_INSTALL_PATH' cannot be executed (Operation not permitted). Removing capabilities."
+    clear_hysteria_capabilities
+    note "Re-run with HYSTERIA_USER=root if you need to bind privileged ports without file capabilities."
+    return
+  fi
+
+  echo "ok"
 }
 
 perform_install_hysteria_binary() {
@@ -1029,7 +1169,9 @@ main() {
   check_permission
   check_environment
   check_hysteria_user "hysteria"
-  check_hysteria_homedir "/var/lib/$HYSTERIA_USER"
+  # Always use /var/lib/hysteria as the service working directory regardless
+  # of the run user (root in containers, hysteria user on bare-metal).
+  check_hysteria_homedir "/var/lib/hysteria"
 
   case "$OPERATION" in
     "install")
