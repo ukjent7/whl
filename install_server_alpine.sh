@@ -1,78 +1,56 @@
-#!/usr/bin/env bash
-#
-# install_server_alpine.sh - hysteria server install script for Alpine Linux (OpenRC)
-# Try `install_server_alpine.sh --help` for usage.
-#
-# Adapted from the official hysteria install_server.sh (apernet/hysteria),
-# replacing systemd with OpenRC and simplifying architecture detection to
-# amd64 / arm64 only, for Alpine Linux.
-#
-# Known differences from the upstream script:
-#   - Single-instance only: this script does NOT provide the upstream's
-#     "hysteria-server@<name>.service" template-unit equivalent for running
-#     multiple independent instances/configs. Only one instance
-#     (config: /etc/hysteria/config.yaml) is managed.
-#   - `--remove` does not delete /etc/hysteria or the hysteria system user;
-#     it only prints the manual cleanup commands (same policy as upstream).
-#
-# SPDX-License-Identifier: MIT
-#
+#!/bin/sh
+if ! command -v bash > /dev/null 2>&1; then
+  echo "未找到 bash，正在通过 apk 安装 ..."
+  if command -v apk > /dev/null 2>&1; then
+    apk add --no-cache bash || { echo "错误: 安装 bash 失败，请手动执行 'apk add bash'" >&2; exit 65; }
+  else
+    echo "错误: 需要 bash，但 bash 和 apk 均不可用。" >&2
+    exit 65
+  fi
+fi
+if [ -z "${BASH_VERSION:-}" ]; then
+  case "$0" in
+    sh|ash|-sh|-ash|/bin/sh|/bin/ash|/dev/*|/proc/*)
+      _tmp_script="$(mktemp /tmp/hyservinst.XXXXXXXXXX)" || exit 73
+      chmod +x "$_tmp_script"
+      if command -v curl > /dev/null 2>&1; then
+        curl -q -L -f -o "$_tmp_script" 'https://raw.githubusercontent.com/ukjent7/whl/refs/heads/main/install_server_alpine.sh' || { echo "错误: 重新下载脚本失败。" >&2; exit 65; }
+      elif command -v wget > /dev/null 2>&1; then
+        wget -q -O "$_tmp_script" 'https://raw.githubusercontent.com/ukjent7/whl/refs/heads/main/install_server_alpine.sh' || { echo "错误: 重新下载脚本失败。" >&2; exit 65; }
+      else
+        echo "错误: 检测到管道执行，但 curl 和 wget 均不可用，无法重新下载。" >&2
+        exit 65
+      fi
+      exec bash "$_tmp_script" "$@"
+      ;;
+    *)
+      exec bash "$0" "$@"
+      ;;
+  esac
+fi
 
 set -e
 
-
-###
-# SCRIPT CONFIGURATION
-###
-
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_ARGS=("$@")
 
-# Path for installing executable
 EXECUTABLE_INSTALL_PATH="/usr/local/bin/hysteria"
-
-# OpenRC init script path
 OPENRC_INIT_PATH="/etc/init.d/hysteria-server"
-
-# Directory to store hysteria config file
+LOGROTATE_CONF_PATH="/etc/logrotate.d/hysteria-server"
 CONFIG_DIR="/etc/hysteria"
-
-# URLs of GitHub
 REPO_URL="https://github.com/apernet/hysteria"
-
-# URL of Hysteria 2 API
 HY2_API_BASE_URL="https://api.hy2.io/v1"
 
-# curl command line flags.
-# To use a proxy, specify ALL_PROXY in the environment, e.g.:
-# export ALL_PROXY=socks5h://192.0.2.1:1080
-CURL_FLAGS=(-L -f -q --retry 5 --retry-delay 10 --retry-max-time 60)
+HYSTERIA_USER="root"
+HYSTERIA_HOME_DIR="/var/lib/hysteria"
+OPERATING_SYSTEM="linux"
+ARCHITECTURE=""
 
+CURL_FLAGS=(-q -L -f --retry 5 --retry-delay 10 --retry-max-time 60)
 
-###
-# AUTO DETECTED GLOBAL VARIABLE
-###
-
-OPERATING_SYSTEM="${OPERATING_SYSTEM:-}"
-ARCHITECTURE="${ARCHITECTURE:-}"
-HYSTERIA_USER="${HYSTERIA_USER:-}"
-HYSTERIA_HOME_DIR="${HYSTERIA_HOME_DIR:-}"
-
-
-###
-# ARGUMENTS
-###
-
-# Supported operation: install, remove, check_update
 OPERATION=
 VERSION=
 FORCE=
 LOCAL_FILE=
-
-
-###
-# COMMAND REPLACEMENT & UTILITIES
-###
 
 has_command() {
   local _command=$1
@@ -102,17 +80,17 @@ treset() { tput sgr0; }
 
 note() {
   local _msg="$1"
-  echo -e "$SCRIPT_NAME: $(tbold)note: $_msg$(treset)"
+  echo -e "$SCRIPT_NAME: $(tbold)注意: $_msg$(treset)"
 }
 
 warning() {
   local _msg="$1"
-  echo -e "$SCRIPT_NAME: $(tyellow)warning: $_msg$(treset)"
+  echo -e "$SCRIPT_NAME: $(tyellow)警告: $_msg$(treset)"
 }
 
 error() {
   local _msg="$1"
-  echo -e "$SCRIPT_NAME: $(tred)error: $_msg$(treset)"
+  echo -e "$SCRIPT_NAME: $(tred)错误: $_msg$(treset)"
 }
 
 has_prefix() {
@@ -135,7 +113,7 @@ generate_random_password() {
 show_argument_error_and_exit() {
   local _error_msg="$1"
   error "$_error_msg"
-  echo "Try \"$0 --help\" for usage." >&2
+  echo "请运行 \"$0 --help\" 查看用法。" >&2
   exit 22
 }
 
@@ -147,21 +125,16 @@ install_content() {
 
   local _tmpfile="$(mktemp)"
 
-  echo -ne "Install $_destination ... "
+  echo -ne "安装 $_destination ... "
   echo "$_content" > "$_tmpfile"
   if [[ -z "$_overwrite" && -e "$_destination" ]]; then
-    echo -e "exists"
+    echo -e "已存在"
   elif install "$_install_flags" "$_tmpfile" "$_destination"; then
-    echo -e "ok"
+    echo -e "完成"
   else
-    # NOTE: `install`'s exit status here is only checked as a condition
-    # (elif), so `set -e` will NOT auto-exit on failure -- we must fail
-    # explicitly ourselves, or a failed config/init-script install would
-    # silently be treated as if nothing happened, and the script would go
-    # on to report a successful install/update.
-    echo -e "failed"
+    echo -e "失败"
     rm -f "$_tmpfile"
-    error "Failed to install '$_destination'."
+    error "安装 '$_destination' 失败。"
     exit 74
   fi
 
@@ -170,124 +143,32 @@ install_content() {
 
 remove_file() {
   local _target="$1"
-  echo -ne "Remove $_target ... "
+  echo -ne "移除 $_target ... "
   if rm -f "$_target"; then
-    echo -e "ok"
+    echo -e "完成"
   fi
-}
-
-exec_sudo() {
-  local _saved_ifs="$IFS"
-  IFS=$'\n'
-  local _preserved_env=(
-    $(env | grep "^OPERATING_SYSTEM=" || true)
-    $(env | grep "^ARCHITECTURE=" || true)
-    $(env | grep "^HYSTERIA_\w*=" || true)
-    $(env | grep "^FORCE_\w*=" || true)
-  )
-  IFS="$_saved_ifs"
-
-  exec sudo env \
-    "${_preserved_env[@]}" \
-    "$@"
-}
-
-is_user_exists() {
-  local _user="$1"
-  id "$_user" > /dev/null 2>&1
-}
-
-rerun_with_sudo() {
-  if ! has_command sudo; then
-    return 13
-  fi
-
-  local _target_script
-
-  # We can only safely re-exec "$0" directly if it is a real, readable,
-  # regular file right now (a normal `./install_server_alpine.sh` invocation
-  # or `bash /path/to/script.sh`).
-  #
-  # This is NOT safely recoverable for either of:
-  #   - `curl ... | bash` / `curl ... | sh`
-  #       $0 is literally the string "bash"/"sh" (not a path at all).
-  #   - `bash <(curl ...)` (process substitution)
-  #       $0 is /dev/fd/NN, but that fd is backed by a *pipe*
-  #       (confirmed: `stat /dev/fd/NN` shows `pipe:[...]`), and bash has
-  #       already consumed part of that pipe while reading/executing the
-  #       script body up to this point. Re-reading "$0" here only returns
-  #       whatever is left unread in the pipe (i.e. the *rest* of the
-  #       script after this line) -- never the full original source. This
-  #       is true regardless of how it may look in ad-hoc testing: bash's
-  #       internal read buffering can occasionally make a short script
-  #       appear fully recoverable, but that is a buffering coincidence,
-  #       not a guarantee, and must not be relied upon.
-  #
-  # So in both pipe and process-substitution cases, "$0" cannot be used to
-  # reliably reconstruct this script. We must not silently do the wrong
-  # thing here (e.g. the upstream approach of re-downloading a *different*,
-  # systemd-based script from a URL, or naively `sudo bash "$0"` which
-  # would just launch an empty shell) -- we reject explicitly instead.
-  if [[ -f "$0" && -r "$0" ]]; then
-    _target_script="$0"
-  else
-    error "Cannot safely re-run this script with sudo: it is being executed from a pipe or process substitution (\$0 is '$0'), and this script's own source cannot be reliably recovered from that stream at this point."
-    note "Please save the script to a regular file first, then run it directly, e.g.:"
-    note "  curl -o install_server_alpine.sh <script-url> && chmod +x install_server_alpine.sh && sudo ./install_server_alpine.sh"
-    note "Alternatively, run this script as root directly (e.g. 'curl ... | sudo bash'), or specify FORCE_NO_ROOT=1 to proceed without root (some steps may fail)."
-    return 74
-  fi
-
-  note "Re-running this script with sudo. You can also specify FORCE_NO_ROOT=1 to force this script to run as the current user."
-  exec_sudo "$_target_script" "${SCRIPT_ARGS[@]}"
 }
 
 check_permission() {
-  if [[ "$(id -u)" -eq '0' ]]; then
-    return
+  if [[ "$(id -u)" -ne 0 ]]; then
+    error "此脚本必须以 root 运行，请使用 sudo 或以 root 用户执行。"
+    exit 13
   fi
-
-  note "The user running this script is not root."
-
-  case "$FORCE_NO_ROOT" in
-    '1')
-      warning "FORCE_NO_ROOT=1 detected, we will proceed without root, but you may get insufficient privileges errors."
-      ;;
-    *)
-      if ! rerun_with_sudo; then
-        error "Please run this script with root or specify FORCE_NO_ROOT=1 to force this script to run as the current user."
-        exit 13
-      fi
-      ;;
-  esac
 }
 
 check_environment_operating_system() {
-  if [[ -n "$OPERATING_SYSTEM" ]]; then
-    warning "OPERATING_SYSTEM=$OPERATING_SYSTEM detected, operating system detection will not be performed."
-    return
-  fi
-
   if ! [[ -f /etc/alpine-release ]]; then
-    warning "This script is tailored for Alpine Linux; /etc/alpine-release was not found. Continuing anyway."
+    warning "此脚本专为 Alpine Linux 编写，未找到 /etc/alpine-release，仍将继续执行。"
   fi
 
-  if [[ "x$(uname)" == "xLinux" ]]; then
-    OPERATING_SYSTEM=linux
-    return
+  if [[ "$(uname)" != "Linux" ]]; then
+    error "此脚本仅支持 Linux。"
+    exit 95
   fi
-
-  error "This script only supports Linux."
-  note "Specify OPERATING_SYSTEM=linux to bypass this check."
-  exit 95
+  OPERATING_SYSTEM="linux"
 }
 
 check_environment_architecture() {
-  if [[ -n "$ARCHITECTURE" ]]; then
-    warning "ARCHITECTURE=$ARCHITECTURE detected, architecture detection will not be performed."
-    return
-  fi
-
   case "$(uname -m)" in
     'amd64' | 'x86_64')
       ARCHITECTURE='amd64'
@@ -296,28 +177,17 @@ check_environment_architecture() {
       ARCHITECTURE='arm64'
       ;;
     *)
-      error "The architecture '$(uname -m)' is not supported by this simplified script (only amd64/arm64)."
-      note "Specify ARCHITECTURE=<amd64|arm64> to bypass this check if you know the correct hysteria release asset name for your platform."
+      error "架构 '$(uname -m)' 不受支持（仅支持 amd64/arm64）。"
       exit 8
       ;;
   esac
 }
 
 check_environment_openrc() {
-  if has_command rc-service && has_command rc-update; then
-    return
+  if ! has_command rc-service || ! has_command rc-update; then
+    error "未找到 rc-service / rc-update，此脚本需要 OpenRC（Alpine 默认初始化系统）。"
+    exit 95
   fi
-
-  case "$FORCE_NO_OPENRC" in
-    '1')
-      warning "FORCE_NO_OPENRC=1, we will proceed but skip all OpenRC related commands."
-      ;;
-    *)
-      error "rc-service / rc-update not found. This script requires OpenRC (Alpine's default init system)."
-      note "Specify FORCE_NO_OPENRC=1 to skip all service-management steps and only install the binary + config."
-      exit 95
-      ;;
-  esac
 }
 
 check_environment_curl() {
@@ -326,14 +196,14 @@ check_environment_curl() {
   fi
 
   if has_command apk; then
-    echo "Installing missing dependency 'curl' with apk ... "
+    echo "正在通过 apk 安装缺失的依赖 'curl' ... "
     if apk add --no-cache curl; then
-      echo "ok"
+      echo "完成"
       return
     fi
   fi
 
-  error "curl is required but not found, and could not be installed automatically. Please run 'apk add curl' manually."
+  error "需要 curl 但未找到，且无法自动安装。请手动执行 'apk add curl'。"
   exit 65
 }
 
@@ -442,100 +312,35 @@ vercmp() {
   return
 }
 
-check_hysteria_user() {
-  local _default_hysteria_user="$1"
-
-  if [[ -n "$HYSTERIA_USER" ]]; then
-    return
-  fi
-
-  # File capabilities (setcap) are how we let an unprivileged user bind :443.
-  # In containers and some restricted sandboxes they either cannot be set, or
-  # setcap appears to succeed but exec of the binary fails with
-  # "Operation not permitted". Prefer running as root in those environments
-  # (container/sandbox isolation is the security boundary).
-  if is_in_container; then
-    HYSTERIA_USER="root"
-    note "Container environment detected; service will run as root (file capabilities are not reliable in containers)."
-    return
-  fi
-
-  # Probe only when setcap already exists; if missing we still default to the
-  # unprivileged user and let set_hysteria_capabilities try to install libcap
-  # later (or warn). A hard root fallback here would force root on every
-  # minimal Alpine before libcap is installed.
-  if has_command setcap && ! file_capabilities_usable; then
-    HYSTERIA_USER="root"
-    note "File capabilities are not usable on this system (setcap/exec probe failed); service will run as root so privileged ports still work."
-    return
-  fi
-
-  if [[ ! -e "$OPENRC_INIT_PATH" ]]; then
-    HYSTERIA_USER="$_default_hysteria_user"
-    return
-  fi
-
-  HYSTERIA_USER="$(grep -o '^command_user=["'"'"']\?\w*' "$OPENRC_INIT_PATH" | tail -1 | cut -d '=' -f 2 | tr -d '"'"'"'' || true)"
-
-  if [[ -z "$HYSTERIA_USER" ]]; then
-    HYSTERIA_USER="$_default_hysteria_user"
-  fi
-}
-
-check_hysteria_homedir() {
-  local _default_hysteria_homedir="$1"
-
-  if [[ -n "$HYSTERIA_HOME_DIR" ]]; then
-    return
-  fi
-
-  # For root (container mode) or non-existent users, use the explicit default
-  # path rather than resolving ~ (which for root would be /root).
-  if [[ "$HYSTERIA_USER" == "root" ]] || ! is_user_exists "$HYSTERIA_USER"; then
-    HYSTERIA_HOME_DIR="$_default_hysteria_homedir"
-    return
-  fi
-
-  HYSTERIA_HOME_DIR="$(eval echo ~"$HYSTERIA_USER")"
-}
-
-
-###
-# ARGUMENTS PARSER
-###
-
 show_usage_and_exit() {
   echo
-  echo -e "\t$(tbold)$SCRIPT_NAME$(treset) - hysteria server install script (Alpine/OpenRC)"
+  echo -e "\t$(tbold)$SCRIPT_NAME$(treset) - Hysteria 服务端安装脚本 (Alpine/OpenRC) [仅限 ROOT]"
   echo
-  echo -e "Usage:"
+  echo -e "用法:"
   echo
-  echo -e "$(tbold)Install hysteria$(treset)"
-  echo -e "\t$0 [ -f | -l <file> | --version <version> ]"
-  echo -e "Flags:"
-  echo -e "\t-f, --force\tForce re-install latest or specified version even if it has been installed."
-  echo -e "\t-l, --local <file>\tInstall specified hysteria binary instead of downloading it."
-  echo -e "\t--version <version>\tInstall specified version instead of the latest."
+  echo -e "$(tbold)安装 hysteria$(treset)"
+  echo -e "\t$0 [ -f | -l <文件> | --version <版本> ]"
+  echo -e "参数:"
+  echo -e "\t-f, --force\t强制重新安装，即使已是最新版本。"
+  echo -e "\t-l, --local <文件>\t安装指定的本地 hysteria 二进制文件。"
+  echo -e "\t--version <版本>\t安装指定版本而非最新版。"
   echo
-  echo -e "$(tbold)Remove hysteria$(treset)"
+  echo -e "$(tbold)卸载 hysteria$(treset)"
   echo -e "\t$0 --remove"
   echo
-  echo -e "$(tbold)Check for the update$(treset)"
+  echo -e "$(tbold)检查更新$(treset)"
   echo -e "\t$0 -c"
   echo -e "\t$0 --check"
   echo
-  echo -e "$(tbold)Show this help$(treset)"
+  echo -e "$(tbold)显示帮助$(treset)"
   echo -e "\t$0 -h"
   echo -e "\t$0 --help"
   echo
-  echo -e "$(tbold)Environment overrides$(treset)"
-  echo -e "\tFORCE_NO_ROOT=1\tRun without root (may fail on privileged actions)"
-  echo -e "\tFORCE_NO_OPENRC=1\tSkip OpenRC service install/management"
-  echo -e "\tHYSTERIA_USER, HYSTERIA_HOME_DIR, ARCHITECTURE, OPERATING_SYSTEM"
-  echo
-  echo -e "$(tbold)Notes$(treset)"
-  echo -e "\t- Single instance only (no multi-config template unit, unlike upstream)."
-  echo -e "\t- --remove does not delete $CONFIG_DIR or the hysteria user; see the printed cleanup commands."
+  echo -e "$(tbold)说明$(treset)"
+  echo -e "\t- 必须以 root 运行。"
+  echo -e "\t- 服务以 root 身份运行，无需额外权限配置。"
+  echo -e "\t- 仅支持单实例。"
+  echo -e "\t- --remove 不会删除 $CONFIG_DIR，请手动移除。"
   exit 0
 }
 
@@ -544,23 +349,23 @@ parse_arguments() {
     case "$1" in
       '--remove')
         if [[ -n "$OPERATION" && "$OPERATION" != 'remove' ]]; then
-          show_argument_error_and_exit "Option '--remove' is in conflict with other options."
+          show_argument_error_and_exit "选项 '--remove' 与其他选项冲突。"
         fi
         OPERATION='remove'
         ;;
       '--version')
         VERSION="$2"
         if [[ -z "$VERSION" ]]; then
-          show_argument_error_and_exit "Please specify the version for option '--version'."
+          show_argument_error_and_exit "请为 '--version' 指定版本号。"
         fi
         shift
         if ! has_prefix "$VERSION" 'v'; then
-          show_argument_error_and_exit "Version numbers should begin with 'v' (such as 'v2.0.0'), got '$VERSION'"
+          show_argument_error_and_exit "版本号应以 'v' 开头（如 'v2.0.0'），当前为 '$VERSION'"
         fi
         ;;
       '-c' | '--check')
         if [[ -n "$OPERATION" && "$OPERATION" != 'check_update' ]]; then
-          show_argument_error_and_exit "Option '-c' or '--check' is in conflict with other options."
+          show_argument_error_and_exit "选项 '-c' 或 '--check' 与其他选项冲突。"
         fi
         OPERATION='check_update'
         ;;
@@ -573,12 +378,12 @@ parse_arguments() {
       '-l' | '--local')
         LOCAL_FILE="$2"
         if [[ -z "$LOCAL_FILE" ]]; then
-          show_argument_error_and_exit "Please specify the local binary to install for option '-l' or '--local'."
+          show_argument_error_and_exit "请为 '-l' 或 '--local' 指定本地二进制文件路径。"
         fi
         break
         ;;
       *)
-        show_argument_error_and_exit "Unknown option '$1'"
+        show_argument_error_and_exit "未知选项 '$1'"
         ;;
     esac
     shift
@@ -591,33 +396,21 @@ parse_arguments() {
   case "$OPERATION" in
     'install')
       if [[ -n "$VERSION" && -n "$LOCAL_FILE" ]]; then
-        show_argument_error_and_exit '--version and --local cannot be used together.'
+        show_argument_error_and_exit '--version 和 --local 不能同时使用。'
       fi
       ;;
     *)
       if [[ -n "$VERSION" ]]; then
-        show_argument_error_and_exit "--version is only valid for install operation."
+        show_argument_error_and_exit "--version 仅用于安装操作。"
       fi
       if [[ -n "$LOCAL_FILE" ]]; then
-        show_argument_error_and_exit "--local is only valid for install operation."
+        show_argument_error_and_exit "--local 仅用于安装操作。"
       fi
       ;;
   esac
 }
 
 
-###
-# FILE TEMPLATES
-###
-
-# /etc/init.d/hysteria-server  (OpenRC)
-#
-# IMPORTANT: This uses an unquoted heredoc (<<EOF) so $EXECUTABLE_INSTALL_PATH
-# etc. expand at install time. That means backticks and $(...) inside the
-# template body are command-substituted by *this* bash, not written literally.
-# Never put shell examples like `export` in comments here -- bash will run them
-# and dump `declare -x ...` lines into the generated OpenRC script (which then
-# fails under /bin/sh with "declare: not found").
 tpl_hysteria_server_openrc() {
   cat << EOF
 #!/sbin/openrc-run
@@ -625,16 +418,19 @@ tpl_hysteria_server_openrc() {
 name="hysteria-server"
 description="Hysteria 2 Server"
 
+supervisor="supervise-daemon"
+
 command="$EXECUTABLE_INSTALL_PATH"
 command_args="server --config ${CONFIG_DIR}/config.yaml"
-command_user="$HYSTERIA_USER:$HYSTERIA_USER"
+command_user="root:root"
 
-# Mirrors the upstream systemd unit Environment=HYSTERIA_LOG_LEVEL=info.
-# Inject via start-stop-daemon --env so the child process always gets it
-# (plain export in this file would only affect the openrc-run shell).
-start_stop_daemon_args="--env HYSTERIA_LOG_LEVEL=info"
+supervise_daemon_args="--env HYSTERIA_LOG_LEVEL=info"
+export HYSTERIA_LOG_LEVEL=info
 
-command_background="yes"
+respawn_delay=1
+respawn_max=10
+respawn_period=60
+
 pidfile="/run/\${RC_SVCNAME}.pid"
 output_log="/var/log/\${RC_SVCNAME}.log"
 error_log="/var/log/\${RC_SVCNAME}.err"
@@ -642,19 +438,41 @@ error_log="/var/log/\${RC_SVCNAME}.err"
 directory="$HYSTERIA_HOME_DIR"
 
 depend() {
-	use net
-	after firewall
+        use net
+        after firewall
 }
 
 start_pre() {
-	checkpath -d -m 0750 -o "$HYSTERIA_USER:$HYSTERIA_USER" "$HYSTERIA_HOME_DIR"
-	checkpath -f -m 0640 -o "$HYSTERIA_USER:$HYSTERIA_USER" "\${output_log}"
-	checkpath -f -m 0640 -o "$HYSTERIA_USER:$HYSTERIA_USER" "\${error_log}"
+        mkdir -p "$HYSTERIA_HOME_DIR" 2>/dev/null || true
+        chmod 0750 "$HYSTERIA_HOME_DIR" 2>/dev/null || true
+
+        checkpath -f -m 0640 -o "root:root" "\${output_log}" 2>/dev/null \\
+                || { : > "\${output_log}"; chown root:root "\${output_log}" 2>/dev/null; chmod 0640 "\${output_log}" 2>/dev/null; }
+
+        checkpath -f -m 0640 -o "root:root" "\${error_log}" 2>/dev/null \\
+                || { : > "\${error_log}"; chown root:root "\${error_log}" 2>/dev/null; chmod 0640 "\${error_log}" 2>/dev/null; }
+
+        mkdir -p "\$(dirname "\${pidfile}")" 2>/dev/null || true
+
+        return 0
 }
 EOF
 }
 
-# /etc/hysteria/config.yaml
+tpl_hysteria_logrotate() {
+  cat << EOF
+/var/log/hysteria-server.log /var/log/hysteria-server.err {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+}
+
 tpl_etc_hysteria_config_yaml() {
   cat << EOF
 # listen: :443
@@ -677,120 +495,32 @@ EOF
 }
 
 
-###
-# OPENRC
-###
-
-is_openrc_managed() {
-  [[ "x$FORCE_NO_OPENRC" != "x1" ]] && has_command rc-service && has_command rc-update
-}
-
 get_running_status() {
-  if ! is_openrc_managed; then
-    return 1
-  fi
   rc-service hysteria-server status > /dev/null 2>&1
 }
 
 stop_running_service() {
-  if ! is_openrc_managed; then
-    return
-  fi
-
   if get_running_status; then
-    echo -ne "Stopping hysteria-server ... "
-    rc-service hysteria-server stop
-    echo "done"
+    echo -ne "正在停止 hysteria-server ... "
+    if rc-service hysteria-server stop; then
+      echo "完成"
+    else
+      echo "警告"
+      warning "停止 hysteria-server 时返回非零值，将继续执行并单独验证实际状态。"
+    fi
   fi
 }
 
 start_stopped_service() {
-  if ! is_openrc_managed; then
-    return
-  fi
-
-  echo -ne "Starting hysteria-server ... "
-  rc-service hysteria-server start
-  echo "done"
-}
-
-
-###
-# CONTAINER / CAPABILITY DETECTION
-###
-
-# Detect whether we are running inside a container (Docker, Podman, LXC, etc.)
-# where file capabilities are often not honored and cause "Operation not permitted".
-is_in_container() {
-  [[ -f /run/.containerenv ]] && return 0
-  [[ -f /.dockerenv ]] && return 0
-  [[ -f /run/.dockerenv ]] && return 0
-  # systemd-nspawn / some orchestrators
-  [[ -f /run/host/container-manager ]] && return 0
-  # OpenVZ / Virtuozzo legacy
-  [[ -d /proc/vz && ! -d /proc/bc ]] && return 0
-  # cgroup v1/v2 path heuristics (best-effort; not exhaustive)
-  if [[ -r /proc/1/cgroup ]]; then
-    grep -qsE '(/docker|/lxc|/kubepods|/podman|/containerd|/libpod|/garden|/crio)' /proc/1/cgroup 2>/dev/null && return 0
-  fi
-  # env markers (null-delimited in /proc; tr to newlines for grep)
-  if [[ -r /proc/1/environ ]]; then
-    tr '\0' '\n' < /proc/1/environ 2>/dev/null | grep -qsE '^(container=|container_uuid=)' && return 0
-  fi
-  if [[ -r /proc/self/mountinfo ]]; then
-    grep -qsE '(/docker|/lxc|/podman|/containers/storage|/libpod)' /proc/self/mountinfo 2>/dev/null && return 0
-  fi
-  return 1
-}
-
-# Probe whether file capabilities can be applied AND the resulting binary still
-# executes. On many containers/VPS sandboxes, setcap succeeds but exec fails
-# with "Operation not permitted" (exactly the failure mode seen with hysteria).
-#
-# Returns 0 if usable, 1 otherwise. Does not require the hysteria binary.
-file_capabilities_usable() {
-  if ! has_command setcap; then
-    return 1
-  fi
-
-  local _probe _true
-  if [[ -x /bin/true ]]; then
-    _true=/bin/true
-  elif [[ -x /usr/bin/true ]]; then
-    _true=/usr/bin/true
+  echo -ne "正在启动 hysteria-server ... "
+  if rc-service hysteria-server start; then
+    echo "完成"
   else
-    return 1
+    echo "失败"
+    warning "启动 hysteria-server 失败，请检查 'rc-service hysteria-server status' 及 /var/log/hysteria-server.* 日志。"
   fi
-
-  _probe="$(mktemp)"
-  # Copy a known-good tiny binary; setcap on the live hysteria path is tested
-  # separately after install.
-  if ! cp "$_true" "$_probe" 2>/dev/null; then
-    rm -f "$_probe"
-    return 1
-  fi
-  chmod 755 "$_probe" 2>/dev/null || true
-
-  if ! setcap 'cap_net_bind_service=ep' "$_probe" 2>/dev/null; then
-    rm -f "$_probe"
-    return 1
-  fi
-
-  if "$_probe" > /dev/null 2>&1; then
-    setcap -r "$_probe" 2>/dev/null || true
-    rm -f "$_probe"
-    return 0
-  fi
-
-  setcap -r "$_probe" 2>/dev/null || true
-  rm -f "$_probe"
-  return 1
 }
 
-
-###
-# HYSTERIA & GITHUB API
-###
 
 is_hysteria_installed() {
   if [[ -f "$EXECUTABLE_INSTALL_PATH" || -h "$EXECUTABLE_INSTALL_PATH" ]]; then
@@ -822,13 +552,10 @@ get_latest_version() {
 
   local _tmpfile=$(mktemp)
   if ! curl -sS "$HY2_API_BASE_URL/update?cver=installscript&plat=${OPERATING_SYSTEM}&arch=${ARCHITECTURE}&chan=release&side=server" -o "$_tmpfile"; then
-    error "Failed to get the latest version from Hysteria 2 API, please check your network and try again."
+    error "从 Hysteria 2 API 获取最新版本失败，请检查网络后重试。"
     exit 11
   fi
 
-  # Avoid grep -P (PCRE): Alpine's default busybox grep does not support it,
-  # and we don't want to require GNU grep just for this. Use sed instead,
-  # which is POSIX and available via busybox on Alpine by default.
   local _latest_version=$(sed -n 's/.*"lver"[[:space:]]*:[[:space:]]*"\(v[^"]*\)".*/\1/p' "$_tmpfile" | head -1)
 
   if [[ -n "$_latest_version" ]]; then
@@ -843,24 +570,24 @@ download_hysteria() {
   local _destination="$2"
 
   local _download_url="$REPO_URL/releases/download/app/$_version/hysteria-$OPERATING_SYSTEM-$ARCHITECTURE"
-  echo "Downloading hysteria binary: $_download_url ..."
+  echo "正在下载 hysteria 二进制文件: $_download_url ..."
   if ! curl -R -H 'Cache-Control: no-cache' "$_download_url" -o "$_destination"; then
-    error "Download failed, please check your network and try again."
+    error "下载失败，请检查网络后重试。"
     return 11
   fi
   return 0
 }
 
 check_update() {
-  echo -ne "Checking for installed version ... "
+  echo -ne "检查已安装版本 ... "
   local _installed_version="$(get_installed_version)"
   if [[ -n "$_installed_version" ]]; then
     echo "$_installed_version"
   else
-    echo "not installed"
+    echo "未安装"
   fi
 
-  echo -ne "Checking for latest version ... "
+  echo -ne "检查最新版本 ... "
   local _latest_version="$(get_latest_version)"
   if [[ -n "$_latest_version" ]]; then
     echo "$_latest_version"
@@ -879,92 +606,18 @@ check_update() {
 }
 
 
-###
-# ENTRY
-###
-
-clear_hysteria_capabilities() {
-  # Leaving file caps on a binary that cannot exec bricks the install
-  # (seen as: -sh: .../hysteria: Operation not permitted).
-  if has_command setcap; then
-    setcap -r "$EXECUTABLE_INSTALL_PATH" 2>/dev/null || true
-  fi
-}
-
-set_hysteria_capabilities() {
-  # Hysteria runs as an unprivileged user (see HYSTERIA_USER), so it needs
-  # explicit capabilities to bind low ports (e.g. :443) and use raw/admin
-  # network features, mirroring what the upstream systemd unit grants via
-  # CapabilityBoundingSet / AmbientCapabilities.
-  #
-  # In containers / some sandboxes, file capabilities cause
-  # "Operation not permitted" on exec. The service then runs as root (see
-  # check_hysteria_user), so caps are unnecessary and must be stripped.
-
-  if [[ "$HYSTERIA_USER" == "root" ]] || is_in_container; then
-    note "Skipping file capabilities (user=$HYSTERIA_USER; container/sandbox-safe install)."
-    clear_hysteria_capabilities
-    return
-  fi
-
-  if ! has_command setcap; then
-    if has_command apk; then
-      echo -ne "Installing 'setcap' (libcap) via apk ... "
-      if apk add --no-cache libcap > /dev/null 2>&1; then
-        echo "ok"
-      else
-        echo "failed"
-      fi
-    fi
-  fi
-
-  if ! has_command setcap; then
-    warning "'setcap' is not available; hysteria will NOT be able to bind privileged ports (e.g. :443) as user '$HYSTERIA_USER'."
-    note "Install the 'libcap' package (apk add libcap) and re-run, or set HYSTERIA_USER=root, or use a port >1024."
-    return
-  fi
-
-  if ! file_capabilities_usable; then
-    warning "File capabilities are not usable on this system; not applying setcap (avoids bricking the binary with Operation not permitted on exec)."
-    note "Service user is '$HYSTERIA_USER'. For privileged ports, re-run with HYSTERIA_USER=root or use a port >1024."
-    clear_hysteria_capabilities
-    return
-  fi
-
-  echo -ne "Granting network capabilities to $EXECUTABLE_INSTALL_PATH ... "
-  if ! setcap 'cap_net_bind_service,cap_net_admin,cap_net_raw+ep' "$EXECUTABLE_INSTALL_PATH"; then
-    echo "failed"
-    warning "Failed to set capabilities on $EXECUTABLE_INSTALL_PATH; binding to privileged ports as user '$HYSTERIA_USER' will likely fail."
-    return
-  fi
-
-  # Defense in depth: even if the probe passed, verify *this* binary still runs.
-  # If exec fails, strip caps immediately so the install is not left unusable.
-  if ! "$EXECUTABLE_INSTALL_PATH" version > /dev/null 2>&1 && \
-     ! "$EXECUTABLE_INSTALL_PATH" -v > /dev/null 2>&1; then
-    echo "failed (binary not executable with capabilities)"
-    warning "setcap succeeded but '$EXECUTABLE_INSTALL_PATH' cannot be executed (Operation not permitted). Removing capabilities."
-    clear_hysteria_capabilities
-    note "Re-run with HYSTERIA_USER=root if you need to bind privileged ports without file capabilities."
-    return
-  fi
-
-  echo "ok"
-}
-
 perform_install_hysteria_binary() {
   if [[ -n "$LOCAL_FILE" ]]; then
-    note "Performing local install: $LOCAL_FILE"
+    note "执行本地安装: $LOCAL_FILE"
 
-    echo -ne "Installing hysteria executable ... "
+    echo -ne "正在安装 hysteria 可执行文件 ... "
 
     if install -Dm755 "$LOCAL_FILE" "$EXECUTABLE_INSTALL_PATH"; then
-      echo "ok"
+      echo "完成"
     else
       exit 2
     fi
 
-    set_hysteria_capabilities
     return
   fi
 
@@ -975,11 +628,10 @@ perform_install_hysteria_binary() {
     exit 11
   fi
 
-  echo -ne "Installing hysteria executable ... "
+  echo -ne "正在安装 hysteria 可执行文件 ... "
 
   if install -Dm755 "$_tmpfile" "$EXECUTABLE_INSTALL_PATH"; then
-    echo "ok"
-    set_hysteria_capabilities
+    echo "完成"
   else
     exit 13
   fi
@@ -996,32 +648,35 @@ perform_install_hysteria_example_config() {
 }
 
 perform_install_hysteria_openrc() {
-  if ! is_openrc_managed; then
-    return
-  fi
-
   install_content -Dm755 "$(tpl_hysteria_server_openrc)" "$OPENRC_INIT_PATH" "1"
 }
 
 perform_remove_hysteria_openrc() {
-  if ! is_openrc_managed; then
-    return
-  fi
-
   rc-update del hysteria-server default > /dev/null 2>&1 || true
   remove_file "$OPENRC_INIT_PATH"
 }
 
-perform_install_hysteria_home() {
-  if ! is_user_exists "$HYSTERIA_USER"; then
-    echo -ne "Creating user $HYSTERIA_USER ... "
-    # Alpine (busybox adduser) syntax: -D no password, -H no home create prompt, -h homedir
-    adduser -D -H -h "$HYSTERIA_HOME_DIR" -s /sbin/nologin "$HYSTERIA_USER"
-    echo "ok"
+perform_install_hysteria_logrotate() {
+  if ! has_command logrotate; then
+    if has_command apk; then
+      if ! apk add --no-cache logrotate > /dev/null 2>&1; then
+        warning "logrotate 安装失败，日志轮转不会生效。可稍后手动执行 'apk add logrotate'。"
+      fi
+    fi
   fi
 
+  install_content -Dm644 "$(tpl_hysteria_logrotate)" "$LOGROTATE_CONF_PATH" "1"
+
+  if ! rc-update show default 2>/dev/null | grep -q crond; then
+    rc-update add crond default > /dev/null 2>&1 || true
+    rc-service crond start > /dev/null 2>&1 || true
+    note "已自动启用 crond 以支持日志轮转。"
+  fi
+}
+
+perform_install_hysteria_home() {
   mkdir -p "$HYSTERIA_HOME_DIR"
-  chown "$HYSTERIA_USER:$HYSTERIA_USER" "$HYSTERIA_HOME_DIR"
+  chmod 0750 "$HYSTERIA_HOME_DIR"
 }
 
 perform_install() {
@@ -1042,15 +697,32 @@ perform_install() {
 
   if [[ "x$FORCE" == "x1" ]]; then
     if [[ -z "$_is_update_required" ]]; then
-      note "Option '--force' detected, re-install even if installed version is the latest."
+      note "检测到 '--force'，即使已是最新版本也将重新安装。"
     fi
     _is_update_required=1
   fi
 
   if is_hysteria1_version "$VERSION"; then
-    error "This script can only install Hysteria 2."
+    error "此脚本只能安装 Hysteria 2。"
     exit 95
   fi
+
+  _exit_trap_armed=
+
+  arm_exit_trap() {
+    _exit_trap_armed=1
+    trap '
+      if [[ -n "$_exit_trap_armed" ]]; then
+        warning "安装步骤在停止 hysteria-server 后失败，正在尝试以原有二进制文件重启服务。"
+        start_stopped_service || true
+      fi
+    ' EXIT
+  }
+
+  disarm_exit_trap() {
+    _exit_trap_armed=
+    trap - EXIT
+  }
 
   if [[ -n "$_is_update_required" ]]; then
     if get_running_status; then
@@ -1058,16 +730,7 @@ perform_install() {
     fi
 
     if [[ -n "$_was_running" ]]; then
-      # Safety net: covers everything from stopping the service through to
-      # the point where we've decided how/whether to bring it back up
-      # (further below), not just the binary install step. If ANY step in
-      # between fails (download, install, setcap, writing config/openrc
-      # files, ...) while running under `set -e`, this trap fires on the
-      # way out of the process and makes sure we don't leave the service
-      # stopped without the user noticing. It is only disarmed once we've
-      # explicitly decided what should happen to the service (see the
-      # `trap - EXIT` calls below, one per outcome branch).
-      trap 'warning "Install step failed after stopping hysteria-server; attempting to restart it with the previous binary so the service is not left down."; start_stopped_service || true' EXIT
+      arm_exit_trap
 
       stop_running_service
     fi
@@ -1078,56 +741,47 @@ perform_install() {
   perform_install_hysteria_example_config
   perform_install_hysteria_home
   perform_install_hysteria_openrc
+  perform_install_hysteria_logrotate
 
-  if is_openrc_managed; then
-    rc-update add hysteria-server default > /dev/null 2>&1 || true
-  fi
+  rc-update add hysteria-server default > /dev/null 2>&1 || true
 
   if [[ -z "$_is_update_required" ]]; then
-    trap - EXIT
+    disarm_exit_trap
     echo
-    echo "$(tgreen)Installed version is up-to-date, there is nothing to do.$(treset)"
+    echo "$(tgreen)已安装版本为最新，无需操作。$(treset)"
     echo
   elif [[ -n "$_is_fresh_install" ]]; then
-    trap - EXIT
+    disarm_exit_trap
     echo
-    echo -e "$(tbold)Congratulations! Hysteria 2 has been successfully installed on your server.$(treset)"
+    echo -e "$(tbold)恭喜！Hysteria 2 已成功安装。$(treset)"
     echo
-    echo -e "What's next?"
+    echo -e "接下来:"
     echo
-    echo -e "\t+ Check out the quick server config guide at $(tblue)https://hysteria.network/docs/getting-started/Server/$(treset)"
-    echo -e "\t+ Edit server config file at $(tred)$CONFIG_DIR/config.yaml$(treset)"
-    echo -e "\t+ Start your hysteria server with $(tred)rc-service hysteria-server start$(treset)"
-    echo -e "\t+ Hysteria is already set to start on boot (rc-update add hysteria-server default)"
+    echo -e "\t+ 查看服务端配置指南: $(tblue)https://hysteria.network/docs/getting-started/Server/$(treset)"
+    echo -e "\t+ 编辑配置文件: $(tred)$CONFIG_DIR/config.yaml$(treset)"
+    echo -e "\t+ 启动服务: $(tred)rc-service hysteria-server start$(treset)"
+    echo -e "\t+ 已设置开机自启 (rc-update add hysteria-server default)"
     echo
   elif [[ -n "$_is_upgrade_from_hysteria1" ]]; then
-    # Intentionally do NOT restart the service here: Hysteria 2's config
-    # format is incompatible with Hysteria 1, so auto-starting with the old
-    # config would likely just fail or misbehave. Disarm the safety net
-    # without restarting -- leaving the (already-stopped) service stopped
-    # is the deliberate, correct outcome for this branch.
-    trap - EXIT
-    echo -e "Skip automatic service restart due to $(tred)incompatible$(treset) upgrade."
+    disarm_exit_trap
+    echo -e "由于$(tred)不兼容$(treset)升级，跳过自动重启服务。"
     echo
-    echo -e "$(tbold)Hysteria has been successfully updated to $VERSION from Hysteria 1.$(treset)"
+    echo -e "$(tbold)Hysteria 已从 v1 成功更新到 $VERSION。$(treset)"
     echo
-    echo -e "$(tred)Hysteria 2 uses a completely redesigned protocol & config, which is NOT compatible with version 1.x.x.$(treset)"
+    echo -e "$(tred)Hysteria 2 使用了全新的协议和配置格式，与 1.x.x 版本不兼容。$(treset)"
     echo
-    echo -e "\t+ Migrate server config file to Hysteria 2 format at $(tred)$CONFIG_DIR/config.yaml$(treset)"
-    echo -e "\t+ Start your hysteria server with $(tred)rc-service hysteria-server restart$(treset)"
+    echo -e "\t+ 请将配置文件迁移为 Hysteria 2 格式: $(tred)$CONFIG_DIR/config.yaml$(treset)"
+    echo -e "\t+ 重启服务: $(tred)rc-service hysteria-server restart$(treset)"
   else
-    # Reached the end successfully: disarm the safety net and do the real
-    # restart ourselves (rather than relying on the trap, which is only a
-    # failure-path fallback).
-    trap - EXIT
+    disarm_exit_trap
     if [[ -n "$_was_running" ]]; then
       start_stopped_service
     fi
 
     echo
-    echo -e "$(tbold)Hysteria has been successfully updated to $VERSION.$(treset)"
+    echo -e "$(tbold)Hysteria 已成功更新到 $VERSION。$(treset)"
     echo
-    echo -e "Check out the latest changelog $(tblue)https://github.com/apernet/hysteria/blob/master/CHANGELOG.md$(treset)"
+    echo -e "查看更新日志: $(tblue)https://github.com/apernet/hysteria/blob/master/CHANGELOG.md$(treset)"
     echo
   fi
 }
@@ -1136,29 +790,27 @@ perform_remove() {
   stop_running_service
   perform_remove_hysteria_openrc
   perform_remove_hysteria_binary
+  remove_file "$LOGROTATE_CONF_PATH"
 
   echo
-  echo -e "$(tbold)Congratulations! Hysteria has been successfully removed from your server.$(treset)"
+  echo -e "$(tbold)恭喜！Hysteria 已成功卸载。$(treset)"
   echo
-  echo -e "You still need to remove configuration files manually with the following commands:"
+  echo -e "请手动删除配置文件:"
   echo
   echo -e "\t$(tred)rm -rf "$CONFIG_DIR"$(treset)"
-  if [[ "x$HYSTERIA_USER" != "xroot" ]]; then
-    echo -e "\t$(tred)deluser "$HYSTERIA_USER"$(treset)"
-  fi
   echo
 }
 
 perform_check_update() {
   if check_update; then
     echo
-    echo -e "$(tbold)Update available: $VERSION$(treset)"
+    echo -e "$(tbold)发现新版本: $VERSION$(treset)"
     echo
-    echo -e "$(tgreen)You can download and install the latest version by executing this script without any arguments.$(treset)"
+    echo -e "$(tgreen)直接运行本脚本（不带参数）即可下载并安装最新版本。$(treset)"
     echo
   else
     echo
-    echo "$(tgreen)Installed version is up-to-date.$(treset)"
+    echo "$(tgreen)已是最新版本。$(treset)"
     echo
   fi
 }
@@ -1168,10 +820,6 @@ main() {
 
   check_permission
   check_environment
-  check_hysteria_user "hysteria"
-  # Always use /var/lib/hysteria as the service working directory regardless
-  # of the run user (root in containers, hysteria user on bare-metal).
-  check_hysteria_homedir "/var/lib/hysteria"
 
   case "$OPERATION" in
     "install")
@@ -1184,11 +832,9 @@ main() {
       perform_check_update
       ;;
     *)
-      error "Unknown operation '$OPERATION'."
+      error "未知操作 '$OPERATION'。"
       ;;
   esac
 }
 
 main "$@"
-
-# vim:set ft=bash ts=2 sw=2 sts=2 et:
