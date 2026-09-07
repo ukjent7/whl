@@ -174,7 +174,7 @@
       "type": "mixed",
       "tag": "mixed-in",
       "listen": "127.0.0.1",
-      "set_system_proxy": true
+      "set_system_proxy": true,
       "listen_port": 10808
     }
   ],
