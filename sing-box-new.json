@@ -191,7 +191,7 @@
         "server_name": "XXX",
         "insecure": false,
         "certificate_public_key_sha256": [
-          "D9:82:4F:A7:3C:61:BE:20:95:DD:18:6A:F4:39:72:C8:0E:AB:57:31:FC:84:26:E9:5B:13:6D:A0:48:CE:7F:B2"
+          "bDuqwjyD6200YO5oWtx8c1SzacFiFgyxdNxmsob598U="
         ]
       },
       "domain_resolver": "direct-dns"
