@@ -182,7 +182,7 @@
       "type": "hysteria2",
       "tag": "proxy",
       "server": "XXX",
-      "server_port": XXX,
+      "server_port": 443,
       "password": "XXX",
       "up_mbps": 100,
       "down_mbps": 100,
