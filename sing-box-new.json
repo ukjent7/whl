@@ -1,0 +1,348 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "http_clients": [
+    {
+      "tag": "proxy-http",
+      "detour": "proxy"
+    }
+  ],
+  "dns": {
+    "servers": [
+      {
+        "type": "hosts",
+        "tag": "hosts",
+        "predefined": {
+          "dns.google": [
+            "8.8.8.8",
+            "8.8.4.4",
+            "2001:4860:4860::8888",
+            "2001:4860:4860::8844"
+          ],
+          "dns.alidns.com": [
+            "223.5.5.5",
+            "223.6.6.6",
+            "2400:3200::1",
+            "2400:3200:baba::1"
+          ],
+          "one.one.one.one": [
+            "1.1.1.1",
+            "1.0.0.1",
+            "2606:4700:4700::1111",
+            "2606:4700:4700::1001"
+          ],
+          "1dot1dot1dot1.cloudflare-dns.com": [
+            "1.1.1.1",
+            "1.0.0.1",
+            "2606:4700:4700::1111",
+            "2606:4700:4700::1001"
+          ],
+          "cloudflare-dns.com": [
+            "104.16.249.249",
+            "104.16.248.249",
+            "2606:4700::6810:f8f9",
+            "2606:4700::6810:f9f9"
+          ],
+          "dns.cloudflare.com": [
+            "162.159.61.8",
+            "172.64.41.8",
+            "2a06:98c1:52::8",
+            "2803:f800:53::8"
+          ],
+          "dot.pub": [
+            "1.12.12.12",
+            "120.53.53.53"
+          ],
+          "doh.pub": [
+            "1.12.12.12",
+            "120.53.53.53"
+          ],
+          "dns.quad9.net": [
+            "9.9.9.9",
+            "149.112.112.112",
+            "2620:fe::fe",
+            "2620:fe::9"
+          ],
+          "dns.yandex.net": [
+            "77.88.8.8",
+            "77.88.8.1",
+            "2a02:6b8::feed:0ff",
+            "2a02:6b8:0:1::feed:0ff"
+          ],
+          "dns.sb": [
+            "45.11.45.11",
+            "185.222.222.222",
+            "2a09::",
+            "2a11::"
+          ],
+          "dns.umbrella.com": [
+            "208.67.220.220",
+            "208.67.222.222",
+            "2620:119:35::35",
+            "2620:119:53::53"
+          ],
+          "dns.sse.cisco.com": [
+            "208.67.220.220",
+            "208.67.222.222",
+            "2620:119:35::35",
+            "2620:119:53::53"
+          ],
+          "engage.cloudflareclient.com": [
+            "162.159.192.1",
+            "2606:4700:d0::a29f:c001"
+          ]
+        }
+      },
+      {
+        "type": "udp",
+        "tag": "direct-dns",
+        "server": "119.29.29.29"
+      },
+      {
+        "type": "https",
+        "tag": "remote-dns",
+        "server": "cloudflare-dns.com",
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "cloudflare-dns.com"
+        },
+        "detour": "proxy",
+        "domain_resolver": "hosts"
+      }
+    ],
+    "rules": [
+      {
+        "domain": [
+          "dns.google",
+          "dns.alidns.com",
+          "one.one.one.one",
+          "1dot1dot1dot1.cloudflare-dns.com",
+          "cloudflare-dns.com",
+          "dns.cloudflare.com",
+          "dot.pub",
+          "doh.pub",
+          "dns.quad9.net",
+          "dns.yandex.net",
+          "dns.sb",
+          "dns.umbrella.com",
+          "dns.sse.cisco.com",
+          "engage.cloudflareclient.com"
+        ],
+        "action": "route",
+        "server": "hosts"
+      },
+      {
+        "domain": [
+          "cloudflare-dns.com"
+        ],
+        "action": "route",
+        "server": "direct-dns"
+      },
+      {
+        "domain_suffix": [
+          "alidns.com",
+          "doh.pub",
+          "dot.pub",
+          "360.cn",
+          "onedns.net"
+        ],
+        "action": "route",
+        "server": "direct-dns"
+      },
+      {
+        "rule_set": [
+          "geosite-google"
+        ],
+        "action": "route",
+        "server": "remote-dns"
+      },
+      {
+        "rule_set": [
+          "geosite-private",
+          "geosite-cn"
+        ],
+        "action": "route",
+        "server": "direct-dns"
+      }
+    ],
+    "final": "remote-dns"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 10808
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "proxy",
+      "server": "XXX",
+      "server_port": XXX,
+      "password": "XXX",
+      "up_mbps": 100,
+      "down_mbps": 100,
+      "tls": {
+        "enabled": true,
+        "server_name": "XXX",
+        "insecure": false,
+        "certificate_public_key_sha256": [
+          "XXX"
+        ]
+      },
+      "domain_resolver": "direct-dns"
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff",
+        "sniffer": [
+          "http",
+          "tls"
+        ]
+      },
+      {
+        "network": "udp",
+        "port": 443,
+        "action": "route",
+        "outbound": "block"
+      },
+      {
+        "rule_set": [
+          "geosite-google"
+        ],
+        "action": "route",
+        "outbound": "proxy"
+      },
+      {
+        "ip_is_private": true,
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
+          "geosite-private"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "ip_cidr": [
+          "223.5.5.5",
+          "223.6.6.6",
+          "2400:3200::1",
+          "2400:3200:baba::1",
+          "119.29.29.29",
+          "1.12.12.12",
+          "120.53.53.53",
+          "2402:4e00::",
+          "2402:4e00:1::",
+          "180.76.76.76",
+          "2400:da00::6666",
+          "114.114.114.114",
+          "114.114.115.115",
+          "114.114.114.119",
+          "114.114.115.119",
+          "114.114.114.110",
+          "114.114.115.110",
+          "180.184.1.1",
+          "180.184.2.2",
+          "101.226.4.6",
+          "218.30.118.6",
+          "123.125.81.6",
+          "140.207.198.6",
+          "1.2.4.8",
+          "210.2.4.8",
+          "52.80.66.66",
+          "117.50.22.22",
+          "2400:7fc0:849e:200::4",
+          "2404:c2c0:85d8:901::4",
+          "117.50.10.10",
+          "52.80.52.52",
+          "2400:7fc0:849e:200::8",
+          "2404:c2c0:85d8:901::8",
+          "117.50.60.30",
+          "52.80.60.30"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "domain_suffix": [
+          "alidns.com",
+          "doh.pub",
+          "dot.pub",
+          "360.cn",
+          "onedns.net"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
+          "geoip-cn"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
+          "geosite-cn"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      }
+    ],
+    "rule_set": [
+      {
+        "type": "remote",
+        "tag": "geosite-google",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google.srs",
+        "update_interval": "1d"
+      },
+      {
+        "type": "remote",
+        "tag": "geosite-private",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-private.srs",
+        "update_interval": "1d"
+      },
+      {
+        "type": "remote",
+        "tag": "geosite-cn",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+        "update_interval": "1d"
+      },
+      {
+        "type": "remote",
+        "tag": "geoip-cn",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+        "update_interval": "1d"
+      }
+    ],
+    "final": "proxy",
+    "default_domain_resolver": "direct-dns",
+    "default_http_client": "proxy-http"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true
+    }
+  }
+}
