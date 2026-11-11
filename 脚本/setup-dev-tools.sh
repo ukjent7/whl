@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 一键初始化（Debian 系 / Fedora）：换国内源 → 创建免密 sudo 用户 → 安装开发工具
-# curl -fsSL https://raw.githubusercontent.com/ukjent7/whl/refs/heads/main/%E8%84%9A%E6%9C%AC/setup-dev-tools.sh | bash
+#
 #   bash setup-dev-tools.sh        或        curl -fsSL <url> | bash
 #
 # 工具：uv jq yq go ripgrep fd gh kaggle colab ruff shellcheck gawk wl-clipboard
@@ -56,24 +56,36 @@ mirror_debian() {  # $1 = http | https；可重复执行（也会把已换成镜
 }
 
 mirror_fedora() {  # 依据 https://mirror.lzu.edu.cn/help/fedora/：F43 及更旧改 repo 文件，F44+ 用 dnf config-manager 覆盖
-  local base="https://$MIRROR/fedora" ver=${VERSION_ID%%.*} f kv
-  for f in /etc/yum.repos.d/fedora{,-updates}.repo; do
-    [[ -f $f ]] || continue
+  local base="https://$MIRROR/fedora" ver=${VERSION_ID%%.*} old=0 f kv
+  local repos=(/etc/yum.repos.d/fedora{,-updates}.repo)
+  local opts=("fedora.baseurl=$base/releases/\$releasever/Everything/\$basearch/os/"
+              "updates.baseurl=$base/updates/\$releasever/Everything/\$basearch/"
+              fedora.metalink= fedora.mirrorlist= updates.metalink= updates.mirrorlist=)
+  [[ $ver =~ ^[0-9]+$ ]] && ((ver <= 43)) && old=1
+
+  for f in "${repos[@]}"; do
+    if [[ ! -f $f ]]; then warn "未找到 $f，跳过"; continue; fi
     backup "$f"
     # 有 metalink/mirrorlist 时 dnf 会忽略 baseurl，所以先注释掉
-    sed -Ei 's/^(metalink|mirrorlist)=/#\1=/' "$f"
-    if [[ $ver =~ ^[0-9]+$ ]] && ((ver <= 43)); then
-      sed -i "s|^#baseurl=http://download.example/pub/fedora/linux|baseurl=$base|" "$f"
-    fi
+    sed -Ei 's/^[[:space:]]*(metalink|mirrorlist)[[:space:]]*=/#&/' "$f"
+    if ((old)); then sed -i "s|^#baseurl=http://download.example/pub/fedora/linux|baseurl=$base|" "$f"; fi
   done
-  if ! [[ $ver =~ ^[0-9]+$ ]] || ((ver > 43)); then
-    for kv in "fedora.baseurl=$base/releases/\$releasever/Everything/\$basearch/os/" \
-              "updates.baseurl=$base/updates/\$releasever/Everything/\$basearch/" \
-              fedora.metalink= fedora.mirrorlist= updates.metalink= updates.mirrorlist=; do
-      dnf config-manager setopt "$kv"
-    done
+  if ((! old)); then
+    for kv in "${opts[@]}"; do dnf config-manager setopt "$kv"; done
   fi
-  log "dnf 源 -> $base"
+
+  # 换完立刻校验；镜像不可用（没同步完、缺 repodata…）就回滚到官方源，别把 dnf 留在坏状态
+  if dnf makecache --refresh; then
+    log "dnf 源 -> $base"
+    return 0
+  fi
+  warn "镜像 $MIRROR 上的 Fedora $ver 元数据不可用，回滚到官方源（之后可换个 MIRROR 再运行）"
+  for f in "${repos[@]}"; do
+    if [[ -f $f.bak.cn ]]; then cp -a "$f.bak.cn" "$f"; fi
+  done
+  if ((! old)); then
+    for kv in "${opts[@]}"; do dnf config-manager unsetopt "${kv%%=*}" || true; done
+  fi
 }
 
 stage_root() {
