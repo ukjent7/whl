@@ -4,12 +4,17 @@
 #   bash setup-dev-tools.sh
 #   curl -fsSL https://raw.githubusercontent.com/ukjent7/whl/refs/heads/main/%E8%84%9A%E6%9C%AC/setup-dev-tools.sh | bash
 #
-# 支持：Debian 13+、Ubuntu 24.04+、Fedora 41+（dnf5）；Debian/Ubuntu 衍生版尽力而为
-# 工具：uv ruff kaggle colab zig(官方tarball) · rust(minimal+rustfmt/clippy) · bun · go yq · jq rg fd gh shellcheck gawk wl-clipboard 等
+# 支持：Ubuntu 26.04+、Fedora 45+（dnf5）；只支持最新发行版，旧系统不保证
+# 工具：uv ruff kaggle colab zig(系统包优先/PyPI兜底) · rust(minimal+rustfmt/clippy) · bun · go yq · jq rg fd gh shellcheck gawk wl-clipboard 等
 # 配置：只看下面几个常量，要改直接编辑。可重复运行。
 
 if [[ ! -f $0 ]]; then  # curl | bash：先落盘，后面要以 root / 新用户身份重新执行自己
-  self=$(mktemp /tmp/setup-dev-tools.XXXXXX) && cat >"$self" && exec bash "$self" "$@"
+  [[ -t 0 ]] && { echo '[x] 交互式终端请直接运行脚本文件，或用 curl -fsSL <url> | bash' >&2; exit 1; }
+  self=$(mktemp /tmp/setup-dev-tools.XXXXXX) || exit 1
+  cat >"$self"
+  # 哨兵校验：网络断流导致下载半截时拒绝执行，绝不以 root 跑残缺脚本
+  grep -qF '# <<< setup-dev-tools EOF <<<' "$self" || { rm -f "$self"; echo '[x] 脚本下载不完整，拒绝执行' >&2; exit 1; }
+  exec bash "$self" "$@"
   exit 1
 fi
 set -euo pipefail
@@ -28,14 +33,11 @@ have() { command -v "$1" >/dev/null; }
 # shellcheck disable=SC1091
 . /etc/os-release
 case $ID in
-  debian) FAMILY=deb MIN=13 ;;
-  ubuntu) FAMILY=deb MIN=24 ;;
-  fedora) FAMILY=rpm MIN=41 ;;
-  *) [[ " ${ID_LIKE:-} " == *" debian "* || " ${ID_LIKE:-} " == *" ubuntu "* ]] \
-       || die "不支持 ${PRETTY_NAME:-$ID}（仅 Debian / Ubuntu / Fedora）"
-     FAMILY=deb MIN=0; warn "${PRETTY_NAME:-$ID} 是衍生版，跳过版本检查" ;;
+  ubuntu) FAMILY=deb MIN=26 ;;
+  fedora) FAMILY=rpm MIN=45 ;;
+  *) die "不支持 ${PRETTY_NAME:-$ID}（仅 Ubuntu 26.04+ / Fedora 45+）" ;;
 esac
-# Debian 12 / Ubuntu 22.04 的 Go < 1.21，不能自动拉新工具链；Fedora 40- 还是 dnf4
+# 只支持最新发行版：旧系统的包版本/仓库布局不在保障范围
 [[ -z ${VERSION_ID:-} ]] || ((${VERSION_ID%%.*} >= MIN)) || die "${PRETTY_NAME:-$ID} 太旧，需要 $ID $MIN+"
 
 # ═══════════════ 阶段 1（root）：换系统源、建用户 ═══════════════
@@ -44,10 +46,10 @@ switch_apt() {  # 改写 → apt update 验证 → 失败换下一个镜像 → 
   local scheme=https hosts re m f files=()
   # 最小化系统没有 CA 证书时用 http（apt 靠 GPG 签名校验，http 也不会被篡改）
   [[ -s /etc/ssl/certs/ca-certificates.crt ]] || scheme=http
-  hosts='deb\.debian\.org|security\.debian\.org|ftp[.a-z0-9]*\.debian\.org|[.a-z0-9]*archive\.ubuntu\.com|security\.ubuntu\.com|ports\.ubuntu\.com'
+  hosts='[-.a-z0-9]*archive\.ubuntu\.com|security\.ubuntu\.com|ports\.ubuntu\.com'
   for m in "${MIRRORS[@]}"; do hosts+="|${m//./\\.}"; done
-  # 主仓库和 security 一起换（USTC 的 security 同步延迟通常几小时；路径 debian-security / ubuntu）
-  re="https?://($hosts)/(debian-security|debian|ubuntu|ubuntu-ports)(/|[[:space:]]|\$)"
+  # 主仓库和 security 一起换（USTC 的 security 同步延迟通常几小时；路径 ubuntu / ubuntu-ports）
+  re="https?://($hosts)/(ubuntu|ubuntu-ports)(/|[[:space:]]|\$)"
 
   for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.{list,sources}; do
     [[ -f $f ]] && grep -qE "$re" "$f" && files+=("$f")
@@ -66,7 +68,7 @@ switch_apt() {  # 改写 → apt update 验证 → 失败换下一个镜像 → 
   apt-get update
 }
 
-switch_dnf() {  # dnf5 覆写文件：F41–F45 通用（F45 的 .repo 已挪到 /usr/share/dnf5/repos.d），回滚只需删文件
+switch_dnf() {  # dnf5 覆写文件：F45+ 的 .repo 在 /usr/share/dnf5/repos.d，回滚只需删文件
   local f=/etc/dnf/repos.override.d/90-cn-mirror.repo m
   mkdir -p "${f%/*}"
   dnf clean all >/dev/null 2>&1 || true  # WSL 镜像自带缓存常引用已轮换的旧 repomd 摘要（zck 404 根源）
@@ -97,8 +99,11 @@ stage_root() {
 
   if [[ $FAMILY == deb ]]; then
     export DEBIAN_FRONTEND=noninteractive
+    local had_ca=1
+    [[ -s /etc/ssl/certs/ca-certificates.crt ]] || had_ca=0
     switch_apt
     apt-get install -y sudo ca-certificates
+    ((had_ca)) || switch_apt  # 装前无证书走了 http，装好后重切回 https
   else
     switch_dnf
     dnf install -y sudo
@@ -116,6 +121,7 @@ stage_root() {
   tmp=$(mktemp /tmp/setup-dev-tools.XXXXXX)  # 全局变量：EXIT trap 触发时函数早已返回
   trap 'rm -f "$tmp"' EXIT
   install -m 0755 "$0" "$tmp"
+  [[ $0 == /tmp/setup-dev-tools.* ]] && rm -f "$0"  # 清掉 curl|bash 自举落盘的副本（内容已复制走）
   log "切换到 $NEW_USER 安装工具"
   runuser -l "$NEW_USER" -c "bash $tmp --user"
 
@@ -156,22 +162,31 @@ EOF
 [install]
 registry = "$NPM"
 EOF
-  grep -qs '>>> setup-dev-tools' ~/.bashrc || cat >>~/.bashrc <<EOF
-
+  # 环境变量块插到 .bashrc 最前面：deb 系 .bashrc 开头的非交互守卫（case $-）会直接 return，
+  # 追加到末尾等于没写；插到头部对登录/交互 shell 都生效。临时文件放 $HOME 内建，免 SELinux 标签错位
+  if ! grep -qs '>>> setup-dev-tools' ~/.bashrc; then
+    {
+      cat <<EOF
 # >>> setup-dev-tools >>>
 export PATH="\$HOME/.local/bin:\$HOME/.cargo/bin:\$HOME/.bun/bin:\$HOME/go/bin:\$PATH"
 export RUSTUP_DIST_SERVER=$USTC/rust-static
 export RUSTUP_UPDATE_ROOT=$USTC/rust-static/rustup
 # <<< setup-dev-tools <<<
+
 EOF
+      cat ~/.bashrc 2>/dev/null || true
+    } >~/.bashrc.tmp && mv ~/.bashrc.tmp ~/.bashrc && log "写入 ~/.bashrc（头部）"
+  fi
 }
 
 user_packages() {
   local p pkgs=(curl ca-certificates git unzip zip jq ripgrep fd-find gh gawk wl-clipboard lsof file patch rsync)
   if [[ $FAMILY == deb ]]; then
-    pkgs+=(build-essential golang-go shellcheck procps iproute2 iputils-ping bind9-dnsutils openssh-client xz-utils)
+    # 正常流程阶段 1 已更新过索引；只有直跑 --user 且本地无索引才补。zig 已固定在 Ubuntu 26.04+ universe
+    compgen -G '/var/lib/apt/lists/*Packages*' >/dev/null || sudo apt-get update
+    pkgs+=(build-essential golang-go zig shellcheck procps iproute2 iputils-ping bind9-dnsutils openssh-client)
   else
-    pkgs+=(gcc golang ShellCheck procps-ng iproute iputils bind-utils openssh-clients yq zig uv ruff xz)
+    pkgs+=(gcc golang ShellCheck procps-ng iproute iputils bind-utils openssh-clients yq zig uv ruff)
   fi
   log "安装系统包"
   sudo env DEBIAN_FRONTEND=noninteractive "${PKG[@]}" "${pkgs[@]}" || {
@@ -186,58 +201,38 @@ install_bun() {  # 官方脚本 bun.sh/install；二进制来自 GitHub Releases
   curl -fsSL https://bun.sh/install | BUN_INSTALL="$HOME/.bun" bash -s
 }
 
-install_zig() {  # 官方分发：ziglang.org/download/index.json 自带版本号与每个 tarball 的 sha256
-  local idx rel ver arch t sha got dir
-  idx=$(curl -fsSL https://ziglang.org/download/index.json)
-  rel=$(jq -r 'to_entries | map(select(.key != "master")) | .[0].key' <<<"$idx")
-  ver=$(jq -r --arg r "$rel" '.[$r].version' <<<"$idx")
-  case $(uname -m) in
-    x86_64) arch=x86_64-linux ;; aarch64|arm64) arch=aarch64-linux ;;
-    *) warn "zig 不支持 $(uname -m)"; return 1 ;;
-  esac
-  t=$(jq -r --arg r "$rel" --arg a "$arch" '.[$r][$a].tarball' <<<"$idx")
-  sha=$(jq -r --arg r "$rel" --arg a "$arch" '.[$r][$a].shasum' <<<"$idx")
-  log "安装 zig $ver (官方 tarball)"
-  curl -fsSL "$t" -o /tmp/zig.tar.xz || return 1
-  got=$(sha256sum /tmp/zig.tar.xz | awk '{print $1}')
-  if [[ $got != "$sha" ]]; then warn "zig 官方 tarball 校验和不匹配"; rm -f /tmp/zig.tar.xz; return 1; fi
-  mkdir -p ~/.local/opt
-  tar -xJf /tmp/zig.tar.xz -C ~/.local/opt || { warn "zig 解压失败"; rm -f /tmp/zig.tar.xz; return 1; }
-  dir=$(basename "${t%.tar.xz}")
-  ln -sfn "$HOME/.local/opt/$dir/zig" ~/.local/bin/zig || { warn "zig 软链失败"; return 1; }
-  rm -f /tmp/zig.tar.xz
-}
-
 user_tools() {
   if ! have uv; then
     log "安装 uv"
     curl -fsSL "$USTC/github-release/astral-sh/uv/LatestRelease/uv-installer.sh" |
       env UV_DOWNLOAD_URL="$USTC/github-release/astral-sh/uv/LatestRelease" UV_NO_MODIFY_PATH=1 sh
   fi
-  # rpm 分支的 uv/ruff/zig 已由 dnf 装；deb 系源里没有，走 uv/PyPI 官方渠道
-  have ruff  || { log "安装 ruff";  uv tool install --upgrade ruff; }
-  have colab || { log "安装 colab";  uv tool install --upgrade google-colab-cli; }
-  have kaggle || { log "安装 kaggle"; uv tool install --upgrade kaggle --with six; }  # kaggle 2.2.5 import six 却没声明依赖
-  have zig || install_zig || warn "zig 未装上，报告里会显示未找到"
+  # rpm 与 Ubuntu 26.04+ 的 uv/ruff/zig/yq 由包管理器装（/usr 下不动）；其余走 uv/PyPI 官方渠道（USTC 源）
+  # ~/.local 里的用户版每次重跑都 --upgrade（全 latest 策略）
+  [[ $(command -v ruff 2>/dev/null) == /usr/* ]]  || { log "安装/更新 ruff";  uv tool install --upgrade ruff; }
+  [[ $(command -v colab 2>/dev/null) == /usr/* ]] || { log "安装/更新 colab";  uv tool install --upgrade google-colab-cli; }
+  [[ $(command -v kaggle 2>/dev/null) == /usr/* ]] || { log "安装/更新 kaggle"; uv tool install --upgrade kaggle --with six; }  # kaggle 2.2.5 import six 却没声明依赖
+  [[ $(command -v zig 2>/dev/null) == /usr/* ]] || { log "安装/更新 zig (PyPI ziglang)"; uv tool install --upgrade ziglang && ln -sf python-zig ~/.local/bin/zig; }  # ziglang 提供的命令叫 python-zig
 
-  have bun || { log "安装 bun"; install_bun || warn "bun 安装失败（需访问 GitHub Releases），可稍后手动执行 curl -fsSL https://bun.sh/install | bash"; }
+  have bun || install_bun || warn "bun 安装失败（需访问 GitHub Releases），可稍后手动执行 curl -fsSL https://bun.sh/install | bash"
 
   if ! have rustup; then
-    log "安装 Rust"
-    curl -fsSL "$USTC/misc/rustup-install.sh" | sh -s -- -y --no-modify-path --profile minimal
+    log "安装 Rust（含 rustfmt/clippy 组件）"
+    curl -fsSL "$USTC/misc/rustup-install.sh" | sh -s -- -y --no-modify-path --profile minimal -c rustfmt -c clippy
+  else
+    rustup show active-toolchain >/dev/null 2>&1 || rustup default stable  # 无 default 时 component add 会报错
+    rustup component add rustfmt clippy
   fi
-  rustup component add rustfmt clippy
 
   have go || { warn "没有 go，跳过 GOPROXY 和 yq"; return 0; }
   # 只改官方默认值，不覆盖用户自己的 GOPROXY
   [[ $(go env GOPROXY) != https://proxy.golang.org,direct ]] || go env -w GOPROXY="$GOPROXY_URL"
-  # Debian/Ubuntu 源的 yq 是 kislyuk 的 Python 包装版（不是 mikefarah）；Fedora 源的就是原生 Go 版
-  # USTC github-release 没有镜像 yq，go install 是 yq 官方 README 列明的安装方式；全脚本统一跟 latest
-  # 注意：yq 新版 go.mod 要求 Go 1.26，Debian 13 自带 Go 1.24；GOTOOLCHAIN=auto 会经 goproxy.cn 拉新工具链编译（跟 latest 的代价）
-  if [[ $(yq --version 2>&1) != *mikefarah* ]]; then
-    log "安装 yq (mikefarah) @latest"
+  # Ubuntu 26.04 / Fedora 45 自带 Go ≥ 1.26，yq @latest 原生编译即可；USTC 无 yq 二进制镜像，
+  # go install 是 yq 官方 README 列明的方式。系统包（/usr 下的 mikefarah 版）不动，~/.local 版每次更新
+  [[ $(command -v yq 2>/dev/null) == /usr/* && $(yq --version 2>&1) == *mikefarah* ]] || {
+    log "安装/更新 yq (mikefarah) @latest"
     GOTOOLCHAIN=auto GOBIN=~/.local/bin go install "github.com/mikefarah/yq/v4@latest"
-  fi
+  }
 }
 
 user_report() {
@@ -268,3 +263,4 @@ stage_user() {
 
 if [[ $FAMILY == deb ]]; then PKG=(apt-get install -y); else PKG=(dnf install -y); fi
 if [[ ${1:-} == --user ]]; then stage_user; else stage_root "$@"; fi
+# <<< setup-dev-tools EOF <<<
