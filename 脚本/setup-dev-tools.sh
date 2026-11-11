@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 一键初始化：换国内源 → 创建免密 sudo 用户（默认 kk）→ 安装开发工具
 # 支持：Debian 系（Debian/Ubuntu/…）与 Fedora
+# curl -fsSL https://raw.githubusercontent.com/ukjent7/whl/refs/heads/main/%E8%84%9A%E6%9C%AC/setup-dev-tools.sh | bash
 # 工具：uv jq yq go ripgrep fd gh kaggle colab rust(minimal，含 rustfmt/clippy) bun zig
 #       ruff shellcheck gawk wl-clipboard，以及 lsof/ps/ss/ping/dig/file/patch/rsync/ssh/zip 等基础工具
 #
