@@ -7,14 +7,13 @@
 # 用法（root 或有 sudo 权限的用户均可）：
 #   ./setup-dev-tools.sh
 #
-# 可选环境变量：
-#   NEW_USER=kk                    要创建的用户名
-#   USE_CN_MIRROR=1                是否换国内源（设为 0 则全部保持官方源）
-#   MIRROR_HOST=mirrors.lzu.edu.cn apt/dnf/PyPI 使用的镜像站（默认兰州大学）
-#   GOPROXY_URL=https://goproxy.cn,direct   Go 模块代理（写入 go env）
-#   NPM_REGISTRY=https://registry.npmmirror.com   bun install 使用的 npm 源（写入 ~/.bunfig.toml）
-#   GH_PROXY=                      GitHub 下载代理前缀，如 https://xxx.example（默认不用）
-#                                  作用于：uv 安装器、yq 二进制、uv 下载的 Python、bun 安装脚本
+# 说明：本脚本不支持环境变量，所有配置写死在脚本顶部的常量里，需要改动直接编辑常量：
+#   NEW_USER=kk                            要创建的用户名
+#   MIRROR_HOST=mirrors.lzu.edu.cn         apt/dnf 镜像站
+#   PYPI_MIRROR_HOST=mirrors.ustc.edu.cn   uv/pip 使用的 PyPI 镜像站（中科大）
+#   RUST_MIRROR_HOST=mirrors.ustc.edu.cn   rustup/crates.io 镜像站
+#   GOPROXY_URL=https://goproxy.cn,direct  Go 模块代理（写入 go env）
+#   NPM_REGISTRY=https://registry.npmmirror.com  bun install 使用的 npm 源（写入 ~/.bunfig.toml）
 #
 # 流程：
 #   阶段 1（root）：换 apt/dnf 源 → 安装 sudo → 创建用户 → 写入 NOPASSWD sudoers
@@ -31,16 +30,16 @@ fi
 # ─────────────────────────────────────────────────────────────
 set -euo pipefail
 
-NEW_USER="${NEW_USER:-kk}"
-USE_CN_MIRROR="${USE_CN_MIRROR:-1}"
-MIRROR_HOST="${MIRROR_HOST:-mirrors.lzu.edu.cn}"
-GH_PROXY="${GH_PROXY:-}"
-GH_PROXY="${GH_PROXY%/}"
+# 账号与镜像配置（写死，不支持环境变量覆盖）
+NEW_USER=kk
+MIRROR_HOST=mirrors.lzu.edu.cn
 # LZU 没有镜像 rustup/crates.io，这部分使用中科大
-RUST_MIRROR_HOST="${RUST_MIRROR_HOST:-mirrors.ustc.edu.cn}"
-# Go 模块代理与 npm 源（LZU 没有这两项）
-GOPROXY_URL="${GOPROXY_URL:-https://goproxy.cn,direct}"
-NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
+RUST_MIRROR_HOST=mirrors.ustc.edu.cn
+# PyPI 镜像使用中科大（uv / pip 共用）
+PYPI_MIRROR_HOST=mirrors.ustc.edu.cn
+# Go 模块代理与 npm 源（兰州大学没有这两项）
+GOPROXY_URL=https://goproxy.cn,direct
+NPM_REGISTRY=https://registry.npmmirror.com
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
@@ -126,17 +125,14 @@ mirror_fedora() {
 # 阶段 1：以 root 身份换源、创建用户并配置免密 sudo
 # =====================================================================
 stage_root() {
-  # 不是 root 就用 sudo 重新执行自己（env 显式传递变量，避免被 sudo 清掉）
+  # 不是 root 就用 sudo 重新执行自己
   if [ "$(id -u)" -ne 0 ]; then
     have sudo || die "当前不是 root 且没有 sudo，请先切换到 root 再运行。"
     log "需要 root 权限，使用 sudo 重新执行"
-    exec sudo env NEW_USER="$NEW_USER" USE_CN_MIRROR="$USE_CN_MIRROR" \
-      MIRROR_HOST="$MIRROR_HOST" GH_PROXY="$GH_PROXY" \
-      RUST_MIRROR_HOST="$RUST_MIRROR_HOST" GOPROXY_URL="$GOPROXY_URL" \
-      NPM_REGISTRY="$NPM_REGISTRY" bash "$0" "$@"
+    exec sudo bash "$0" "$@"
   fi
 
-  log "检测到 ${PRETTY_NAME:-$ID}，使用 $FAMILY 流程（换源：$([ "$USE_CN_MIRROR" = 1 ] && echo "开 / $MIRROR_HOST" || echo 关)）"
+  log "检测到 ${PRETTY_NAME:-$ID}，使用 $FAMILY 流程（换源：apt/dnf -> ${MIRROR_HOST}，PyPI -> ${PYPI_MIRROR_HOST}）"
 
   # 1) 换系统源，并确保 sudo 可用（最小化系统/容器里常常没有）
   if [ "$FAMILY" = debian ]; then
@@ -144,15 +140,15 @@ stage_root() {
     # 没有 ca-certificates 时 HTTPS 源拉不下来：先用 http，装好证书后再升级成 https
     local scheme=https
     dpkg -s ca-certificates >/dev/null 2>&1 || scheme=http
-    if [ "$USE_CN_MIRROR" = 1 ]; then mirror_debian "$scheme"; fi
+    mirror_debian "$scheme"
     apt-get update -y
     apt-get install -y ca-certificates sudo
-    if [ "$USE_CN_MIRROR" = 1 ] && [ "$scheme" = http ]; then
+    if [ "$scheme" = http ]; then
       mirror_debian_upgrade_https
       apt-get update -y
     fi
   else
-    if [ "$USE_CN_MIRROR" = 1 ]; then mirror_fedora; fi
+    mirror_fedora
     dnf install -y sudo
   fi
 
@@ -186,8 +182,7 @@ stage_root() {
   local copy="/tmp/.setup-dev-tools.$$.sh"
   install -m 0755 "$0" "$copy"
   log "切换到用户 $NEW_USER 继续安装工具"
-  runuser -l "$NEW_USER" -c "$(printf 'USE_CN_MIRROR=%q MIRROR_HOST=%q GH_PROXY=%q RUST_MIRROR_HOST=%q GOPROXY_URL=%q NPM_REGISTRY=%q bash %q --user-stage' \
-      "$USE_CN_MIRROR" "$MIRROR_HOST" "$GH_PROXY" "$RUST_MIRROR_HOST" "$GOPROXY_URL" "$NPM_REGISTRY" "$copy")"
+  runuser -l "$NEW_USER" -c "$(printf 'bash %q --user-stage' "$copy")"
   rm -f "$copy"
 
   echo
@@ -200,19 +195,15 @@ stage_root() {
 # 换源：uv / pip / rustup / cargo（阶段 2，普通用户）
 # =====================================================================
 configure_user_mirrors() {
-  local pypi="https://${MIRROR_HOST}/pypi/web/simple"
+  local pypi="https://${PYPI_MIRROR_HOST}/pypi/web/simple"
 
-  # uv：~/.config/uv/uv.toml（uv 不读 pip.conf）。顶层键必须放在 [[index]] 之前
+  # uv：~/.config/uv/uv.toml（uv 不读 pip.conf）
   local uvconf="$HOME/.config/uv/uv.toml"
   if [ -e "$uvconf" ]; then
     warn "$uvconf 已存在，不覆盖（如需镜像请手动加入 [[index]] 段）"
   else
     mkdir -p "$(dirname "$uvconf")"
     {
-      if [ -n "$GH_PROXY" ]; then
-        echo "python-install-mirror = \"${GH_PROXY}/https://github.com/astral-sh/python-build-standalone/releases/download\""
-        echo
-      fi
       echo "[[index]]"
       echo "url = \"${pypi}\""
       echo "default = true"
@@ -227,7 +218,7 @@ configure_user_mirrors() {
   else
     mkdir -p "$(dirname "$pipconf")"
     printf '[global]\nindex-url = %s\n' "$pypi" > "$pipconf"
-    log "已写入 $pipconf"
+    log "已写入 $pipconf（PyPI -> $pypi）"
   fi
 
   # bun：全局 ~/.bunfig.toml 设置 npm 源（bun install 用）
@@ -299,11 +290,7 @@ stage_user() {
   export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/go/bin:$PATH"
 
   # ---------- 0. 用户级镜像配置 ----------
-  if [ "$USE_CN_MIRROR" = 1 ]; then
-    configure_user_mirrors
-  fi
-  local gh_prefix=""
-  if [ -n "$GH_PROXY" ]; then gh_prefix="${GH_PROXY}/"; fi
+  configure_user_mirrors
 
   # ---------- 1. 系统包（包管理器） ----------
   install_debian() {
@@ -320,7 +307,7 @@ stage_user() {
       log "已创建 fd -> fdfind 软链（~/.local/bin/fd）"
     fi
 
-    # GitHub CLI：发行版仓库版本偏旧，用官方 apt 源（国内访问可能较慢，可设 GH_PROXY 之外自行处理）
+    # GitHub CLI：发行版仓库版本偏旧，用官方 apt 源（国内访问可能较慢，需自行处理）
     if ! have gh; then
       log "添加 GitHub CLI 官方 apt 源"
       $SUDO mkdir -p -m 755 /etc/apt/keyrings
@@ -345,7 +332,7 @@ stage_user() {
         *) die "yq：不支持的架构 $(dpkg --print-architecture)" ;;
       esac
       log "下载 yq (mikefarah) 到 /usr/local/bin"
-      curl -fsSL "${gh_prefix}https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${arch}" -o /tmp/yq
+      curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${arch}" -o /tmp/yq
       $SUDO install -m 0755 /tmp/yq /usr/local/bin/yq
       rm -f /tmp/yq
     fi
@@ -389,9 +376,7 @@ stage_user() {
               openssh-clients zip ShellCheck gawk wl-clipboard ;;
   esac
 
-  if [ "$USE_CN_MIRROR" = 1 ]; then
-    configure_go_mirror
-  fi
+  configure_go_mirror
 
   # zig：优先走包管理器；仓库里没有再退回 PyPI 的 ziglang 包（需要 uv，所以在 uv 之后调用）
   install_zig() {
@@ -425,12 +410,7 @@ stage_user() {
       return 0
     fi
     log "安装 bun（官方脚本）"
-    if [ -n "$GH_PROXY" ]; then
-      # 官方脚本支持用 GITHUB 变量替换下载域名
-      curl -fsSL https://bun.com/install | GITHUB="${GH_PROXY}/https://github.com" bash
-    else
-      curl -fsSL https://bun.com/install | bash
-    fi
+    curl -fsSL https://bun.com/install | bash
     have bun || warn "bun 安装后不在 PATH 中，请重新打开终端后再试"
   }
 
@@ -439,9 +419,6 @@ stage_user() {
     log "uv 已存在，跳过"
   else
     log "安装 uv"
-    if [ -n "$GH_PROXY" ]; then
-      export UV_INSTALLER_GITHUB_BASE_URL="${GH_PROXY}/https://github.com"
-    fi
     curl -LsSf https://astral.sh/uv/install.sh | sh
   fi
   have uv || die "uv 安装失败或不在 PATH 中"
