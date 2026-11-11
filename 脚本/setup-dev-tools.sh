@@ -19,6 +19,16 @@
 # 流程：
 #   阶段 1（root）：换 apt/dnf 源 → 安装 sudo → 创建用户 → 写入 NOPASSWD sudoers
 #   阶段 2（新用户）：配置 uv/pip/bun/rustup/cargo 国内源 → 安装系统包与用户级工具 → 配置 GOPROXY
+if [ ! -f "$0" ] || [ ! -r "$0" ]; then
+  if [ -p /dev/stdin ]; then
+    _self="$(mktemp /tmp/.setup-dev-tools.XXXXXX)" || exit 1
+    cat > "$_self" || exit 1
+    exec bash "$_self" "$@"
+  fi
+  printf '[x] 不支持的运行方式 ($0=%s)。请用: curl -fsSL <url> | bash 或 bash setup-dev-tools.sh\n' "$0" >&2
+  exit 1
+fi
+# ─────────────────────────────────────────────────────────────
 set -euo pipefail
 
 NEW_USER="${NEW_USER:-kk}"
