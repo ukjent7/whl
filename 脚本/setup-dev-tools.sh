@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # 一键初始化：换国内源 → 创建免密 sudo 用户（默认 kk）→ 安装开发工具
 # 支持：Debian 系（Debian/Ubuntu/…）与 Fedora
-# curl -fsSL https://raw.githubusercontent.com/ukjent7/whl/refs/heads/main/%E8%84%9A%E6%9C%AC/setup-dev-tools.sh | bash
 # 工具：uv jq yq go ripgrep fd gh kaggle colab rust(minimal，含 rustfmt/clippy) bun zig
 #       ruff shellcheck gawk wl-clipboard，以及 lsof/ps/ss/ping/dig/file/patch/rsync/ssh/zip 等基础工具
 #
@@ -106,6 +105,7 @@ mirror_fedora() {
       if [ -f "$f" ]; then
         backup_once "$f"
         sed -e 's|^metalink=|#metalink=|g' \
+            -e 's|^mirrorlist=|#mirrorlist=|g' \
             -e "s|^#baseurl=http://download.example/pub/fedora/linux|baseurl=https://${MIRROR_HOST}/fedora|g" \
             -i "$f"
         log "已切换 $f -> https://${MIRROR_HOST}/fedora"
@@ -114,10 +114,14 @@ mirror_fedora() {
       fi
     done
   else
+    # 注意：fedora 仓库用 metalink，updates 用 mirrorlist；dnf 优先 metalink/mirrorlist，
+    # 只设 baseurl 不清空这两项的话 baseurl 会被忽略，所以两项都要清空
     dnf config-manager setopt "fedora.baseurl=https://${MIRROR_HOST}/fedora/releases/\$releasever/Everything/\$basearch/os/"
     dnf config-manager setopt "fedora.metalink="
+    dnf config-manager setopt "fedora.mirrorlist="
     dnf config-manager setopt "updates.baseurl=https://${MIRROR_HOST}/fedora/updates/\$releasever/Everything/\$basearch/"
     dnf config-manager setopt "updates.metalink="
+    dnf config-manager setopt "updates.mirrorlist="
     log "已通过 dnf config-manager 切换到 https://${MIRROR_HOST}/fedora"
   fi
 }
