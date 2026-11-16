@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/ukjent7/whl/refs/heads/main/%E8%84%9A%E6%9C%AC/setup-dev-tools.sh | bash
 #
 # 支持：Ubuntu 26.04+、Fedora 45+（dnf5）；只支持最新发行版，旧系统不保证
-# 工具：uv ruff kaggle colab zig(系统包优先/PyPI兜底) · rust(minimal+rustfmt/clippy) · bun · go yq · jq rg fd gh shellcheck gawk wl-clipboard 等
+# 工具：uv ruff kaggle colab zig(系统包) · rust(minimal+rustfmt/clippy) · bun · go yq · jq rg fd gh shellcheck gawk wl-clipboard 等
 # 配置：只看下面几个常量，要改直接编辑。可重复运行。
 
 if [[ ! -f $0 ]]; then  # curl | bash：先落盘，后面要以 root / 新用户身份重新执行自己
@@ -139,6 +139,7 @@ write_once() {  # write_once 路径 <<EOF；已存在就不覆盖
 user_config() {
   write_once ~/.config/uv/uv.toml <<EOF
 python-install-mirror = "$USTC/github-release/astral-sh/python-build-standalone/"
+concurrent-downloads = 8
 
 [[index]]
 url = "$USTC/pypi/simple"
@@ -154,9 +155,6 @@ replace-with = "ustc"
 
 [source.ustc]
 registry = "sparse+$USTC/crates.io-index/"
-
-[registries.ustc]
-index = "sparse+$USTC/crates.io-index/"
 EOF
   write_once ~/.bunfig.toml <<EOF
 [install]
@@ -212,7 +210,6 @@ user_tools() {
   [[ $(command -v ruff 2>/dev/null) == /usr/* ]]  || { log "安装/更新 ruff";  uv tool install --upgrade ruff; }
   [[ $(command -v colab 2>/dev/null) == /usr/* ]] || { log "安装/更新 colab";  uv tool install --upgrade google-colab-cli; }
   [[ $(command -v kaggle 2>/dev/null) == /usr/* ]] || { log "安装/更新 kaggle"; uv tool install --upgrade kaggle --with six; }  # kaggle 2.2.5 import six 却没声明依赖
-  [[ $(command -v zig 2>/dev/null) == /usr/* ]] || { log "安装/更新 zig (PyPI ziglang)"; uv tool install --upgrade ziglang && ln -sf python-zig ~/.local/bin/zig; }  # ziglang 提供的命令叫 python-zig
 
   have bun || install_bun || warn "bun 安装失败（需访问 GitHub Releases），可稍后手动执行 curl -fsSL https://bun.sh/install | bash"
 
